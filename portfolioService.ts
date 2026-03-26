@@ -1,6 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
 import { logger } from './logger';
-import { getLatestQuote } from './quoteService';
+import { getLatestQuote, mergeFailureBreakdown } from './quoteService';
 import { getUsdKrwRate } from './fxService';
 import { normalizePortfolioInstrument } from './instrumentRegistry';
 import { inferUsAvgIsKrwPerShare, resolvePurchaseCurrency } from './portfolioCost';
@@ -64,6 +64,8 @@ export type PortfolioSnapshot = {
     top3_weight_pct: number;
     domestic_weight_pct: number;
     us_weight_pct: number;
+    quote_failure_count?: number;
+    degraded_quote_mode?: boolean;
   };
   positions: PortfolioPositionSnapshot[];
 };
@@ -96,7 +98,15 @@ export type BuildPortfolioSnapshotOptions = {
 async function computePositionForRow(
   row: any,
   discordUserId: string,
-  usdkrw: number
+  usdkrw: number,
+  quoteStats?: {
+    failed: number;
+    degraded: number;
+    total: number;
+    bySymbol: Record<string, number>;
+    breakdowns: Array<any>;
+    rowDetails: Array<any>;
+  }
 ): Promise<PortfolioPositionSnapshot | null> {
   const normalized = normalizePortfolioInstrument(row);
   const market = normalizeMarket(normalized.market);
@@ -128,6 +138,33 @@ async function computePositionForRow(
     Number(row.current_price || 0),
     currency
   );
+  if (quoteStats) {
+    quoteStats.total += 1;
+    if (q.failedCandidates > 0) quoteStats.failed += q.failedCandidates;
+    if (q.degraded) quoteStats.degraded += 1;
+    const key = String(normalized.symbol || row.symbol || 'UNKNOWN');
+    quoteStats.bySymbol[key] = (quoteStats.bySymbol[key] || 0) + (q.failedCandidates || 0);
+    if (q.failureBreakdown) quoteStats.breakdowns.push(q.failureBreakdown);
+    quoteStats.rowDetails.push({
+      symbol: key,
+      quoteSymbol: normalized.quoteSymbol,
+      traceId: q.traceId || null,
+      finalSource: q.finalSource || null,
+      degraded: q.degraded,
+      failedCandidates: q.failedCandidates,
+      failureBreakdown: q.failureBreakdown || {}
+    });
+    logger.info('QUOTE', 'portfolio row quote result', {
+      discordUserId,
+      symbol: key,
+      market,
+      traceId: q.traceId || null,
+      degraded: q.degraded,
+      failedCandidates: q.failedCandidates,
+      finalSource: q.finalSource || null,
+      failureBreakdown: q.failureBreakdown || {}
+    });
+  }
   const price = Number(q.price || 0);
   if (!Number.isFinite(price) || price <= 0) return null;
 
@@ -348,9 +385,17 @@ export async function buildPortfolioSnapshot(
   const rawRows = data || [];
   const usdkrw = await getUsdKrwRate();
   const positions: PortfolioPositionSnapshot[] = [];
+  const quoteStats = {
+    failed: 0,
+    degraded: 0,
+    total: 0,
+    bySymbol: {} as Record<string, number>,
+    breakdowns: [] as Array<any>,
+    rowDetails: [] as Array<any>
+  };
 
   for (const row of rawRows) {
-    const pos = await computePositionForRow(row, discordUserId, usdkrw);
+    const pos = await computePositionForRow(row, discordUserId, usdkrw, quoteStats);
     if (pos) positions.push(pos);
   }
 
@@ -397,10 +442,33 @@ export async function buildPortfolioSnapshot(
       position_count: sorted.length,
       top3_weight_pct: round2(top3),
       domestic_weight_pct: totalMv > 0 ? round2((domestic / totalMv) * 100) : 0,
-      us_weight_pct: totalMv > 0 ? round2((us / totalMv) * 100) : 0
+      us_weight_pct: totalMv > 0 ? round2((us / totalMv) * 100) : 0,
+      quote_failure_count: quoteStats.failed,
+      degraded_quote_mode: quoteStats.degraded > 0
     },
     positions: sorted
   };
+
+  if (quoteStats.failed > 0 || quoteStats.degraded > 0) {
+    const statusBreakdownTotal = mergeFailureBreakdown(quoteStats.breakdowns);
+    const topFailedSymbols = Object.entries(quoteStats.bySymbol)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5)
+      .map(([symbol]) => symbol);
+    logger.warn('QUOTE', 'quote fetch failures summarized', {
+      discordUserId,
+      failedCandidates: quoteStats.failed,
+      degradedCount: quoteStats.degraded,
+      positionCount: quoteStats.total,
+      top_failed_symbols: topFailedSymbols,
+      status_breakdown_total: statusBreakdownTotal
+    });
+    logger.warn('QUOTE', 'degraded quote mode used', {
+      discordUserId,
+      degradedCount: quoteStats.degraded,
+      row_quote_details: quoteStats.rowDetails.slice(0, 20)
+    });
+  }
 
   logger.info('PORTFOLIO', 'portfolio snapshot built', {
     discordUserId,

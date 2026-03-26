@@ -62,6 +62,9 @@ import { loadPersonaMemory } from './personaMemoryService';
 import { buildPersonaPromptContext, buildBaseAnalysisContext } from './analysisContextService';
 import { runAnalysisPipeline } from './analysisPipelineService';
 import { ingestPersonaFeedback } from './feedbackIngestionService';
+import { generateWithPersonaProvider } from './llmProviderService';
+import type { ProviderGenerationResult } from './analysisTypes';
+import { splitDiscordMessage, chooseInteractionRoute } from './discordResponseUtils';
 
 logger.info('BOOT', 'index initialization started');
 
@@ -141,6 +144,38 @@ function toOpinionSummary(text: string, maxLen = 220): string {
     return t.length <= maxLen ? t : t.slice(0, maxLen) + '…';
 }
 
+function asGeminiResult(text: string): ProviderGenerationResult {
+    return {
+        text,
+        provider: 'gemini',
+        model: 'gemini-2.5-flash'
+    };
+}
+
+function normalizeProviderOutputForDiscord(params: { text: string; provider: string; personaKey: PersonaKey }): string {
+    const provider = params.provider;
+    const personaKey = params.personaKey;
+    let t = String(params.text || '').replace(/\r\n/g, '\n').trim();
+    if (!t) {
+        logger.warn('UX', 'empty provider response handled', { provider, personaKey });
+        t = '응답 생성이 불안정하여 핵심 요약으로 대체합니다. 잠시 후 다시 시도해 주세요.';
+    }
+    if (t.length < 40) {
+        logger.warn('UX', 'too short provider response handled', { provider, personaKey, length: t.length });
+        t = `${t}\n\n- 위 응답이 너무 짧아 핵심 요약이 제한될 수 있습니다.`;
+    }
+    if (t.length > 2600 && !t.startsWith('##')) {
+        t = `## 핵심 요약\n${t.slice(0, 500)}\n\n## 상세 내용\n${t}`;
+    }
+    logger.info('UX', 'provider output normalized', {
+        provider,
+        personaKey,
+        originalLength: String(params.text || '').length,
+        normalizedLength: t.length
+    });
+    return t;
+}
+
 function getFeedbackButtonsRow(chatHistoryId: number, analysisType: string, personaKey: PersonaKey): ActionRowBuilder<ButtonBuilder> {
     const mk = (feedbackType: FeedbackType, label: string, style: ButtonStyle) =>
         new ButtonBuilder()
@@ -154,6 +189,38 @@ function getFeedbackButtonsRow(chatHistoryId: number, analysisType: string, pers
         mk('BOOKMARKED', '저장(Bookmark)', ButtonStyle.Secondary),
         mk('DISLIKED', '별로예요(Dislike)', ButtonStyle.Danger)
     );
+}
+
+async function getRecentClaimIdForFeedback(params: {
+    discordUserId: string;
+    chatHistoryId: number;
+    analysisType: string;
+    personaName: string;
+}): Promise<string | null> {
+    try {
+        const { data, error } = await supabase
+            .from('analysis_claims')
+            .select('id,created_at,claim_order')
+            .eq('discord_user_id', params.discordUserId)
+            .eq('chat_history_id', params.chatHistoryId)
+            .eq('analysis_type', params.analysisType)
+            .eq('persona_name', params.personaName)
+            .order('created_at', { ascending: false })
+            .order('claim_order', { ascending: true })
+            .limit(1)
+            .maybeSingle();
+        if (error) throw error;
+        return data?.id ? String(data.id) : null;
+    } catch (e: any) {
+        logger.warn('FEEDBACK', 'recent claim lookup failed', {
+            discordUserId: params.discordUserId,
+            chatHistoryId: params.chatHistoryId,
+            analysisType: params.analysisType,
+            personaName: params.personaName,
+            message: e?.message || String(e)
+        });
+        return null;
+    }
 }
 
 function getPersonaColumnKey(personaKey: PersonaKey): 'ray_advice' | 'key_risks' | 'key_actions' | 'jyp_insight' | 'simons_opportunity' | 'drucker_decision' | 'cio_decision' | 'jyp_weekly_report' | 'summary' | 'trend_text' {
@@ -377,11 +444,11 @@ async function runPortfolioQueryFromButton(
 
 /** 계좌별 보기 — 에페머럴 메시지 + select 응답 */
 async function runPortfolioQueryFromAccountSelect(interaction: any, discordUserId: string, accountId: string): Promise<void> {
-    await interaction.deferUpdate();
+    await ensureInteractionDeferred(interaction, 'update');
     const rows = await listUserAccounts(discordUserId);
     const acct = rows.find(a => a.id === accountId);
     if (!acct) {
-        await interaction.editReply({ content: '계좌를 찾을 수 없습니다.', components: [] });
+        await safeEditReplyPayload(interaction, { content: '계좌를 찾을 수 없습니다.', components: [] }, 'portfolio:account_select:not_found');
         return;
     }
 
@@ -389,7 +456,7 @@ async function runPortfolioQueryFromAccountSelect(interaction: any, discordUserI
 
     const snapshot = await buildPortfolioSnapshot(discordUserId, { scope: 'ACCOUNT', accountId });
     if (snapshot.summary.position_count === 0) {
-        await interaction.editReply({ content: '선택한 계좌에 조회할 보유 종목이 없습니다.', components: [] });
+        await safeEditReplyPayload(interaction, { content: '선택한 계좌에 조회할 보유 종목이 없습니다.', components: [] }, 'portfolio:account_select:empty');
         return;
     }
 
@@ -416,7 +483,7 @@ async function runPortfolioQueryFromAccountSelect(interaction: any, discordUserI
         hideAggregateAccountBreakdown: false
     });
 
-    await interaction.editReply({ content: text.slice(0, 1990), components: [] });
+    await safeEditReplyPayload(interaction, { content: text, components: [] }, 'portfolio:account_select:success');
 }
 
 async function safeEditReply(interaction: any, content: string, context: string) {
@@ -443,23 +510,109 @@ async function safeDeferReply(interaction: any, options: any = { flags: 64 }): P
         });
         return false;
     }
-    logger.info('INTERACTION', 'defer reply started', {
+    logger.info('INTERACTION', 'interaction deferred', {
         customId: interaction.customId,
         discordUserId: interaction.user?.id
     });
     await interaction.deferReply(normalizeInteractionPayload(options));
+    logger.info('INTERACTION', 'interaction defer succeeded', {
+        customId: interaction.customId,
+        discordUserId: interaction.user?.id
+    });
     return true;
+}
+
+async function safeDeferUpdate(interaction: any): Promise<boolean> {
+    if (interaction.deferred || interaction.replied) {
+        logger.info('INTERACTION', 'interaction defer skipped', {
+            mode: 'update',
+            customId: interaction.customId,
+            deferred: interaction.deferred,
+            replied: interaction.replied
+        });
+        return false;
+    }
+    logger.info('INTERACTION', 'interaction defer started', {
+        mode: 'update',
+        customId: interaction.customId,
+        discordUserId: interaction.user?.id
+    });
+    await interaction.deferUpdate();
+    logger.info('INTERACTION', 'interaction defer succeeded', {
+        mode: 'update',
+        customId: interaction.customId,
+        discordUserId: interaction.user?.id
+    });
+    return true;
+}
+
+async function ensureInteractionDeferred(interaction: any, mode: 'reply' | 'update' = 'reply'): Promise<boolean> {
+    if (mode === 'update') return safeDeferUpdate(interaction);
+    return safeDeferReply(interaction, { flags: 64 });
+}
+
+async function safeSendChunkedInteractionContent(interaction: any, payload: any, context: string): Promise<void> {
+    const normalizedPayload = normalizeInteractionPayload(payload || {});
+    const rawContent = String(normalizedPayload?.content || '');
+    const chunks = splitDiscordMessage(rawContent, 1800);
+    if (rawContent.length > 2000) {
+        logger.warn('DISCORD', 'discord content too long prevented', {
+            context,
+            originalLength: rawContent.length,
+            chunkCount: chunks.length
+        });
+    }
+    if (chunks.length > 1) {
+        logger.info('DISCORD', 'message chunked count', { context, chunkCount: chunks.length });
+    }
+    const firstPayload = { ...normalizedPayload, content: chunks[0] || '' };
+    const route = chooseInteractionRoute(interaction);
+    logger.info('INTERACTION', 'reply route selected', { context, route, deferred: interaction.deferred, replied: interaction.replied });
+    try {
+        if (route === 'reply') {
+            await interaction.reply(firstPayload);
+        } else if (route === 'editReply') {
+            await interaction.editReply(firstPayload);
+        } else {
+            await interaction.followUp(firstPayload);
+        }
+    } catch (e: any) {
+        const msg = String(e?.message || '');
+        if (route === 'editReply') {
+            logger.warn('INTERACTION', 'editReply fallback to followUp', { context, message: msg });
+            try {
+                await interaction.followUp(firstPayload);
+            } catch (e2: any) {
+                logger.error('INTERACTION', 'unknown interaction caught', { context, message: e2?.message || String(e2) });
+                if ((interaction as any)?.channel?.send) {
+                    await (interaction as any).channel.send({ content: firstPayload.content });
+                }
+            }
+        } else {
+            logger.error('INTERACTION', 'unknown interaction caught', { context, message: msg });
+            if ((interaction as any)?.channel?.send) {
+                await (interaction as any).channel.send({ content: firstPayload.content });
+            }
+        }
+    }
+    for (let i = 1; i < chunks.length; i++) {
+        try {
+            const restPayload: any = { content: chunks[i] };
+            if ('flags' in normalizedPayload) restPayload.flags = normalizedPayload.flags;
+            await interaction.followUp(restPayload);
+        } catch {
+            if ((interaction as any)?.channel?.send) {
+                await (interaction as any).channel.send({ content: chunks[i] });
+            }
+        }
+    }
 }
 
 async function safeEditReplyPayload(interaction: any, payload: any, context: string): Promise<void> {
     try {
-        const normalizedPayload = normalizeInteractionPayload(payload);
-        if (!interaction.deferred && !interaction.replied) {
-            await interaction.reply(normalizedPayload);
-        } else {
-            await interaction.editReply(normalizedPayload);
-        }
-        logger.info('INTERACTION', `interaction completed: ${context}`, {
+        await safeSendChunkedInteractionContent(interaction, payload, context);
+        logger.info('INTERACTION', 'discord reply/edit success', {
+            context,
             customId: interaction.customId,
             discordUserId: interaction.user?.id,
             deferred: interaction.deferred,
@@ -469,7 +622,8 @@ async function safeEditReplyPayload(interaction: any, payload: any, context: str
             h.interactions.lastInteractionAt = new Date().toISOString();
         });
     } catch (replyError: any) {
-        logger.error('INTERACTION', `reply failed: ${context}`, {
+        logger.error('INTERACTION', 'discord reply/edit failure', {
+            context,
             customId: interaction.customId,
             discordUserId: interaction.user?.id,
             deferred: interaction.deferred,
@@ -482,12 +636,7 @@ async function safeEditReplyPayload(interaction: any, payload: any, context: str
 
 async function safeReplyOrFollowUp(interaction: any, payload: any, context: string): Promise<void> {
     try {
-        const normalizedPayload = normalizeInteractionPayload(payload);
-        if (interaction.deferred || interaction.replied) {
-            await interaction.followUp(normalizedPayload);
-        } else {
-            await interaction.reply(normalizedPayload);
-        }
+        await safeSendChunkedInteractionContent(interaction, payload, context);
         logger.info('INTERACTION', `interaction completed: ${context}`, {
             customId: interaction.customId,
             discordUserId: interaction.user?.id,
@@ -819,15 +968,7 @@ function isTrendQueryCheck(query: string): boolean {
 }
 
 const DISCORD_CONTENT_MAX = 2000;
-const DISCORD_BODY_CHUNK = 1720;
-
-function chunkDiscordBody(text: string, chunkSize: number): string[] {
-    const chunks: string[] = [];
-    for (let i = 0; i < text.length; i += chunkSize) {
-        chunks.push(text.slice(i, i + chunkSize));
-    }
-    return chunks.length ? chunks : [''];
-}
+const DISCORD_BODY_CHUNK = 1800;
 
 async function broadcastAgentResponse(
     userId: string,
@@ -854,7 +995,7 @@ async function broadcastAgentResponse(
 
     const defaultAvatar = 'https://upload.wikimedia.org/wikipedia/commons/e/ef/System_Preferences_icon_Apple.png';
 
-    const bodyChunks = chunkDiscordBody(finalContent, DISCORD_BODY_CHUNK);
+    const bodyChunks = splitDiscordMessage(finalContent, DISCORD_BODY_CHUNK);
     if (bodyChunks.length > 1) {
         logger.info('DISCORD', 'long response chunked', { parts: bodyChunks.length, agentName });
     }
@@ -997,7 +1138,8 @@ async function runTrendAnalysis(
         updateHealth(s => s.ai.lastRoute = 'trend_isolated');
 
         logger.info('AI', 'Gemini call started');
-        const text = await generateTrendSpecialistResponse(topic, userQuery);
+        const textRaw = await generateTrendSpecialistResponse(topic, userQuery);
+        const text = normalizeProviderOutputForDiscord({ text: textRaw, provider: 'gemini', personaKey: 'TREND' });
         logger.info('AI', 'Gemini call completed');
 
         const analysisType = `trend_${topic}`;
@@ -1036,7 +1178,9 @@ async function runTrendAnalysis(
                     {
                         personaKey: 'TREND',
                         personaName: personaKeyToPersonaName('TREND'),
-                        responseText: text
+                        responseText: text,
+                        providerName: 'gemini',
+                        modelName: 'gemini-2.5-flash'
                     }
                 ],
                 baseContext
@@ -1226,18 +1370,44 @@ async function runPortfolioDebate(userId: string, userQuery: string, sourceInter
         const cioQuery = `${baseQuery}${styleDirectiveBlock}\n\n${personaBiasDirective('CIO')}${cioMemory ? `\n\n${cioMemory}` : ''}`;
 
         // 1) Gemini 결과를 먼저 계산
-        const rayRes = await ray.analyze(rayQuery, false);
+        const rayResRaw = await ray.analyze(rayQuery, false);
+        const rayRes = normalizeProviderOutputForDiscord({ text: rayResRaw, provider: 'gemini', personaKey: 'RAY' });
         if (rayRes?.includes('[REASON: NO_DATA]')) {
             logger.warn('AI', 'Ray Dalio aborted due to NO_DATA at logic layer');
             return;
         }
         logger.info('AGENT', 'Hindenburg analysis started', { userId });
-        const hindenburgRes = await hindenburg.analyze(hindenburgQuery, false);
-        const simonsRes = await simons.strategize(simonsQuery, false, `[Ray]\n${rayRes}\n[Hindenburg]\n${hindenburgRes}`);
+        const hindenburgGen = await generateWithPersonaProvider({
+            discordUserId: userId,
+            personaKey: 'HINDENBURG',
+            personaName: personaKeyToPersonaName('HINDENBURG'),
+            prompt: hindenburgQuery,
+            fallbackToGemini: async () => asGeminiResult(await hindenburg.analyze(hindenburgQuery, false))
+        });
+        const hindenburgRes = normalizeProviderOutputForDiscord({
+            text: hindenburgGen.text,
+            provider: hindenburgGen.provider,
+            personaKey: 'HINDENBURG'
+        });
+        const simonsGen = await generateWithPersonaProvider({
+            discordUserId: userId,
+            personaKey: 'SIMONS',
+            personaName: personaKeyToPersonaName('SIMONS'),
+            prompt: simonsQuery,
+            fallbackToGemini: async () =>
+                asGeminiResult(await simons.strategize(simonsQuery, false, `[Ray]\n${rayRes}\n[Hindenburg]\n${hindenburgRes}`))
+        });
+        const simonsRes = normalizeProviderOutputForDiscord({
+            text: simonsGen.text,
+            provider: simonsGen.provider,
+            personaKey: 'SIMONS'
+        });
         const druckerCombinedLog = `${personaBiasDirective('DRUCKER')}${styleDirectiveBlock}\n[Ray]\n${rayRes}\n[Hindenburg]\n${hindenburgRes}\n[Simons]\n${simonsRes}`;
-        const druckerRes = await drucker.summarizeAndGenerateActions(false, druckerCombinedLog);
+        const druckerResRaw = await drucker.summarizeAndGenerateActions(false, druckerCombinedLog);
+        const druckerRes = normalizeProviderOutputForDiscord({ text: druckerResRaw, provider: 'gemini', personaKey: 'DRUCKER' });
         const cioCombinedLog = `${personaBiasDirective('CIO')}${styleDirectiveBlock}\n[Ray]\n${rayRes}\n[Hindenburg]\n${hindenburgRes}\n[Simons]\n${simonsRes}\n[Drucker]\n${druckerRes}`;
-        const cioRes = await cio.decide(false, cioCombinedLog);
+        const cioResRaw = await cio.decide(false, cioCombinedLog);
+        const cioRes = normalizeProviderOutputForDiscord({ text: cioResRaw, provider: 'gemini', personaKey: 'CIO' });
 
         const analysisType = guessAnalysisTypeFromTrigger(triggerId, userQuery);
 
@@ -1302,11 +1472,25 @@ async function runPortfolioDebate(userId: string, userQuery: string, sourceInter
                 chatHistoryId,
                 analysisType,
                 personaOutputs: [
-                    { personaKey: 'RAY', personaName: personaKeyToPersonaName('RAY'), responseText: rayRes },
-                    { personaKey: 'HINDENBURG', personaName: personaKeyToPersonaName('HINDENBURG'), responseText: hindenburgRes },
-                    { personaKey: 'SIMONS', personaName: personaKeyToPersonaName('SIMONS'), responseText: simonsRes },
-                    { personaKey: 'DRUCKER', personaName: personaKeyToPersonaName('DRUCKER'), responseText: druckerRes },
-                    { personaKey: 'CIO', personaName: personaKeyToPersonaName('CIO'), responseText: cioRes }
+                    { personaKey: 'RAY', personaName: personaKeyToPersonaName('RAY'), responseText: rayRes, providerName: 'gemini', modelName: 'gemini-2.5-flash' },
+                    {
+                        personaKey: 'HINDENBURG',
+                        personaName: personaKeyToPersonaName('HINDENBURG'),
+                        responseText: hindenburgRes,
+                        providerName: hindenburgGen.provider,
+                        modelName: hindenburgGen.model,
+                        estimatedCostUsd: hindenburgGen.estimated_cost_usd
+                    },
+                    {
+                        personaKey: 'SIMONS',
+                        personaName: personaKeyToPersonaName('SIMONS'),
+                        responseText: simonsRes,
+                        providerName: simonsGen.provider,
+                        modelName: simonsGen.model,
+                        estimatedCostUsd: simonsGen.estimated_cost_usd
+                    },
+                    { personaKey: 'DRUCKER', personaName: personaKeyToPersonaName('DRUCKER'), responseText: druckerRes, providerName: 'gemini', modelName: 'gemini-2.5-flash' },
+                    { personaKey: 'CIO', personaName: personaKeyToPersonaName('CIO'), responseText: cioRes, providerName: 'gemini', modelName: 'gemini-2.5-flash' }
                 ],
                 baseContext
             });
@@ -1476,20 +1660,39 @@ async function runOpenTopicDebate(userId: string, userQuery: string, sourceInter
 
         // isTrendQuery=true로 validateAndGenerate의 NO_DATA 하드게이트를 우회
         const results: Partial<Record<PersonaKey, string>> = {};
+        const providerMetaByKey: Partial<Record<PersonaKey, { provider: string; model: string; estimatedCostUsd?: number }>> = {};
         for (const p of selected) {
             const agent = personas[p];
             const memoryDirective = memoryByKey.get(p) ?? '';
             const personaQuery = memoryDirective ? `${effectiveQuery}\n\n${memoryDirective}` : effectiveQuery;
+            if (p === 'SIMONS') {
+                const gen = await generateWithPersonaProvider({
+                    discordUserId: userId,
+                    personaKey: 'SIMONS',
+                    personaName: personaKeyToPersonaName('SIMONS'),
+                    prompt: personaQuery,
+                    fallbackToGemini: async () => asGeminiResult(await agent.strategize(personaQuery, true, ''))
+                });
+                providerMetaByKey[p] = {
+                    provider: gen.provider,
+                    model: gen.model,
+                    estimatedCostUsd: gen.estimated_cost_usd
+                };
+                const normalized = normalizeProviderOutputForDiscord({ text: gen.text, provider: gen.provider, personaKey: p });
+                results[p] = filterForbiddenFinancialKeywords(normalized, p);
+                continue;
+            }
+
             const rawText = await (p === 'RAY'
                 ? agent.analyze(personaQuery, true)
                 : p === 'JYP'
                     ? agent.inspire(personaQuery, true, '')
-                    : p === 'SIMONS'
-                        ? agent.strategize(personaQuery, true, '')
-                        : p === 'DRUCKER'
-                            ? agent.summarizeAndGenerateActions(true, '')
-                            : agent.decide(true, ''));
-            results[p] = filterForbiddenFinancialKeywords(rawText, p);
+                    : p === 'DRUCKER'
+                        ? agent.summarizeAndGenerateActions(true, '')
+                        : agent.decide(true, ''));
+            providerMetaByKey[p] = { provider: 'gemini', model: 'gemini-2.5-flash' };
+            const normalized = normalizeProviderOutputForDiscord({ text: rawText, provider: 'gemini', personaKey: p });
+            results[p] = filterForbiddenFinancialKeywords(normalized, p);
         }
 
         const debateType = 'open_topic';
@@ -1532,7 +1735,10 @@ async function runOpenTopicDebate(userId: string, userQuery: string, sourceInter
                 personaOutputs: selected.map(p => ({
                     personaKey: p,
                     personaName: personaKeyToPersonaName(p),
-                    responseText: String(results[p] || '')
+                    responseText: String(results[p] || ''),
+                    providerName: providerMetaByKey[p]?.provider || 'gemini',
+                    modelName: providerMetaByKey[p]?.model || 'gemini-2.5-flash',
+                    estimatedCostUsd: providerMetaByKey[p]?.estimatedCostUsd
                 })),
                 baseContext
             });
@@ -1856,32 +2062,77 @@ client.on('interactionCreate', async (interaction: Interaction) => {
                     const analysisType = String(chatRow.debate_type || 'unknown');
                     const personaName = personaKeyToPersonaName(personaKey);
 
-                    await saveAnalysisFeedbackHistory({
+                    const preferredClaimId = await getRecentClaimIdForFeedback({
                         discordUserId,
                         chatHistoryId,
                         analysisType,
-                        personaName,
-                        opinionSummary,
-                        opinionText,
-                        feedbackType
+                        personaName
                     });
 
-                    // Phase 1: claim_feedback + persona_memory 학습 루프 연결 (best-effort)
+                    let ingestResult: {
+                        mappedCount: number;
+                        fallbackLegacyOnly: boolean;
+                        duplicate: boolean;
+                        bestClaimId: string | null;
+                        mappingMethod: 'direct_claim_id' | 'scored_candidate' | 'legacy_only';
+                        mappingScore: number | null;
+                        candidateCount: number;
+                    } = {
+                        mappedCount: 0,
+                        fallbackLegacyOnly: true,
+                        duplicate: false,
+                        bestClaimId: null,
+                        mappingMethod: 'legacy_only',
+                        mappingScore: null,
+                        candidateCount: 0
+                    };
                     try {
-                        await ingestPersonaFeedback({
+                        ingestResult = await ingestPersonaFeedback({
                             discordUserId,
                             chatHistoryId,
                             analysisType,
                             personaName,
                             feedbackType,
                             feedbackNote: null,
-                            opinionText
+                            opinionText,
+                            preferredClaimId
                         });
                     } catch {
-                        // 기존 UX(analysis_feedback_history 저장 성공) 자체는 유지되어야 함
+                        // keep legacy flow
                     }
 
-                    await safeEditReply(interaction, `✅ 피드백 저장 완료: ${feedbackType}`, 'feedback:save:success');
+                    const historyResult = await saveAnalysisFeedbackHistory({
+                        discordUserId,
+                        chatHistoryId,
+                        analysisType,
+                        personaName,
+                        opinionSummary,
+                        opinionText,
+                        feedbackType,
+                        mappedClaimId: ingestResult.bestClaimId,
+                        mappingMethod: ingestResult.mappingMethod,
+                        mappingScore: ingestResult.mappingScore
+                    });
+
+                    logger.info('FEEDBACK', 'feedback button handled', {
+                        discordUserId,
+                        chatHistoryId,
+                        personaKey,
+                        feedbackType,
+                        historyDuplicate: historyResult.duplicate,
+                        claimMappedCount: ingestResult.mappedCount,
+                        fallbackLegacyOnly: ingestResult.fallbackLegacyOnly,
+                        claimDuplicate: ingestResult.duplicate,
+                        mappingMethod: ingestResult.mappingMethod,
+                        mappingScore: ingestResult.mappingScore,
+                        mappedClaimId: ingestResult.bestClaimId,
+                        candidateCount: ingestResult.candidateCount
+                    });
+
+                    const uxMessage = historyResult.duplicate || ingestResult.duplicate
+                        ? `✅ 피드백은 이미 반영되어 있습니다. (${feedbackType})`
+                        : `✅ 피드백이 저장되었습니다. (${feedbackType})`;
+                    await safeEditReply(interaction, uxMessage, 'feedback:save:success');
                 } catch (e: any) {
                     logger.error('PROFILE', 'feedback save handler failed', { error: e?.message || String(e) });
                     await safeEditReply(interaction, `❌ 피드백 저장 실패 (시스템 로그 기록됨).`, 'feedback:save:failure');

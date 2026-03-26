@@ -80,3 +80,36 @@ export type PersonaPromptContext = {
   memory_directive: string;
 };
 
+export type LlmProvider = 'gemini' | 'openai';
+
+export type ProviderModelConfig = {
+  personaKey: PersonaKey;
+  provider: LlmProvider;
+  model: string;
+};
+
+export type ProviderGenerationResult = {
+  text: string;
+  provider: LlmProvider;
+  model: string;
+  usage?: {
+    input_tokens?: number;
+    output_tokens?: number;
+    total_tokens?: number;
+  };
+  estimated_cost_usd?: number;
+};
+
+export type UsageTrackingRow = {
+  id?: string;
+  discord_user_id: string;
+  persona_name: string;
+  provider: LlmProvider;
+  model: string;
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  estimated_cost_usd: number;
+  year_month: string;
+  created_at?: string | null;
+};
+

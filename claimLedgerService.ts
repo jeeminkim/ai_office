@@ -326,3 +326,117 @@ export async function selectBestClaimForFeedback(params: {
   }
 }
 
+export async function resolveClaimMappingForFeedback(params: {
+  discordUserId: string;
+  chatHistoryId: number;
+  analysisType: string;
+  personaName: string;
+  feedbackOpinionText: string;
+  preferredClaimId?: string | null;
+}): Promise<{
+  bestClaimId: string | null;
+  mappingMethod: 'direct_claim_id' | 'scored_candidate' | 'legacy_only';
+  mappingScore: number | null;
+  candidateCount: number;
+}> {
+  const { discordUserId, chatHistoryId, analysisType, personaName, feedbackOpinionText, preferredClaimId } = params;
+  try {
+    const { data, error } = await supabase
+      .from('analysis_claims')
+      .select('*')
+      .eq('discord_user_id', discordUserId)
+      .eq('chat_history_id', chatHistoryId)
+      .eq('analysis_type', analysisType)
+      .eq('persona_name', personaName)
+      .order('created_at', { ascending: false })
+      .order('claim_order', { ascending: true })
+      .limit(20);
+    if (error) throw error;
+    const candidates = (data || []) as any[];
+    if (!candidates.length) {
+      logger.warn('FEEDBACK', 'feedback mapping legacy only', {
+        discordUserId,
+        chatHistoryId,
+        analysisType,
+        personaName,
+        reason: 'no_candidates'
+      });
+      return { bestClaimId: null, mappingMethod: 'legacy_only', mappingScore: null, candidateCount: 0 };
+    }
+
+    if (preferredClaimId) {
+      const direct = candidates.find(c => String(c.id) === String(preferredClaimId));
+      if (direct?.id) {
+        logger.info('FEEDBACK', 'feedback mapping direct hit', {
+          discordUserId,
+          chatHistoryId,
+          analysisType,
+          personaName,
+          claimId: direct.id
+        });
+        return {
+          bestClaimId: String(direct.id),
+          mappingMethod: 'direct_claim_id',
+          mappingScore: 1,
+          candidateCount: candidates.length
+        };
+      }
+    }
+
+    const opinionText = String(feedbackOpinionText || '');
+    const needles = extractClaimLines(opinionText).slice(0, 6);
+    const latestCreatedAt = Date.parse(String(candidates[0]?.created_at || new Date().toISOString()));
+    const targetOrder = Number(candidates[0]?.claim_order || 1);
+
+    const scored = candidates.map((c: any) => {
+      const hay = `${c.claim_summary}\n${c.claim_text}`;
+      const overlap = computeOverlapScore(hay, needles);
+      const samePersonaBonus = 0.2;
+      const sameAnalysisTypeBonus = 0.2;
+      const recentMs = Math.max(1, latestCreatedAt - Date.parse(String(c.created_at || candidates[0]?.created_at)));
+      const recentBonus = Math.max(0, 0.6 - recentMs / (1000 * 60 * 60 * 24));
+      const orderGap = Math.abs(Number(c.claim_order || targetOrder) - targetOrder);
+      const orderBonus = Math.max(0, 0.4 - orderGap * 0.08);
+      const rawScore = overlap + samePersonaBonus + sameAnalysisTypeBonus + recentBonus + orderBonus;
+      return { c, score: Number(rawScore.toFixed(4)) };
+    });
+    scored.sort((a, b) => b.score - a.score);
+    const top = scored[0];
+    if (!top?.c?.id) {
+      logger.warn('FEEDBACK', 'feedback mapping legacy only', {
+        discordUserId,
+        chatHistoryId,
+        analysisType,
+        personaName,
+        reason: 'empty_scored_top'
+      });
+      return { bestClaimId: null, mappingMethod: 'legacy_only', mappingScore: null, candidateCount: candidates.length };
+    }
+
+    logger.info('FEEDBACK', 'feedback mapping scored candidate', {
+      discordUserId,
+      chatHistoryId,
+      analysisType,
+      personaName,
+      claimId: top.c.id,
+      mappingScore: top.score,
+      candidateCount: candidates.length
+    });
+    return {
+      bestClaimId: String(top.c.id),
+      mappingMethod: 'scored_candidate',
+      mappingScore: top.score,
+      candidateCount: candidates.length
+    };
+  } catch (e: any) {
+    logger.warn('FEEDBACK', 'feedback mapping legacy only', {
+      discordUserId,
+      chatHistoryId,
+      analysisType,
+      personaName,
+      reason: e?.message || String(e)
+    });
+    return { bestClaimId: null, mappingMethod: 'legacy_only', mappingScore: null, candidateCount: 0 };
+  }
+}
+

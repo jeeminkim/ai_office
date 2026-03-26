@@ -29,9 +29,12 @@ async function saveGenerationTraceBestEffort(params: {
   memorySnapshot?: any;
   evidenceSnapshot?: any;
   outputSummary?: string | null;
+  providerName?: string | null;
+  modelName?: string | null;
+  estimatedCostUsd?: number | null;
 }): Promise<void> {
   try {
-    const traceRow: any = {
+    const traceRowBase: any = {
       discord_user_id: params.discordUserId,
       chat_history_id: params.chatHistoryId,
       analysis_type: params.analysisType,
@@ -44,13 +47,28 @@ async function saveGenerationTraceBestEffort(params: {
       token_hint_in: null,
       token_hint_out: null
     };
+    const traceRowExtended: any = {
+      ...traceRowBase,
+      provider_name: params.providerName ?? null,
+      model_name: params.modelName ?? null,
+      estimated_cost_usd: params.estimatedCostUsd ?? null
+    };
 
-    const { error } = await supabase.from('analysis_generation_trace').insert(traceRow);
-    if (error) throw error;
+    let { error } = await supabase.from('analysis_generation_trace').insert(traceRowExtended);
+    if (error) {
+      logger.warn('TRACE', 'analysis_generation_trace extended insert failed; fallback to base columns', {
+        message: error.message
+      });
+      const retry = await supabase.from('analysis_generation_trace').insert(traceRowBase);
+      error = retry.error || null;
+      if (error) throw error;
+    }
     logger.info('TRACE', 'analysis_generation_trace stored', {
       discordUserId: params.discordUserId,
       analysisType: params.analysisType,
-      personaName: params.personaName
+      personaName: params.personaName,
+      providerName: params.providerName ?? null,
+      modelName: params.modelName ?? null
     });
   } catch (e: any) {
     logger.warn('TRACE', 'analysis_generation_trace save failed', {
@@ -72,6 +90,9 @@ export async function persistAnalysisArtifacts(params: {
   baseContext?: any;
   // best-effort
   memorySnapshot?: PersonaMemory;
+  providerName?: string;
+  modelName?: string;
+  estimatedCostUsd?: number;
 }): Promise<void> {
   const { discordUserId, chatHistoryId, analysisType, personaName, responseText, baseContext } = params;
 
@@ -118,7 +139,10 @@ export async function persistAnalysisArtifacts(params: {
     inputContextHash,
     memorySnapshot: personaMemory,
     evidenceSnapshot: evidenceBundle,
-    outputSummary: String(claims?.[0]?.claim_summary || null)
+    outputSummary: String(claims?.[0]?.claim_summary || null),
+    providerName: params.providerName ?? null,
+    modelName: params.modelName ?? null,
+    estimatedCostUsd: params.estimatedCostUsd ?? null
   });
 
   const saved = await saveClaims({
@@ -160,6 +184,9 @@ export async function runAnalysisPipeline(params: {
     personaKey: PersonaKey;
     personaName: string;
     responseText: string;
+    providerName?: string;
+    modelName?: string;
+    estimatedCostUsd?: number;
   }>;
   baseContext?: any;
 }): Promise<void> {
@@ -172,7 +199,10 @@ export async function runAnalysisPipeline(params: {
       personaKey: p.personaKey,
       personaName: p.personaName,
       responseText: p.responseText,
-      baseContext: params.baseContext
+      baseContext: params.baseContext,
+      providerName: p.providerName,
+      modelName: p.modelName,
+      estimatedCostUsd: p.estimatedCostUsd
     });
   }
 }

@@ -127,8 +127,12 @@ export function buildPortfolioDiscordMessage(
   });
 
   const body = ['───', '**보유 종목**', '', ...posLines.map(x => `${x}\n`)].join('\n');
+  const quoteWarn =
+    snapshot.summary.degraded_quote_mode || (snapshot.summary.quote_failure_count || 0) > 0
+      ? `\n\n⚠️ 일부 종목의 실시간 시세 조회가 실패해 최근 저장값/매수가 기준으로 대체되었습니다. (실패 ${snapshot.summary.quote_failure_count || 0}건)`
+      : '';
 
-  return `${head.join('\n')}\n${body}${snapshotFooterLine(opts.snapshotFooter)}`;
+  return `${head.join('\n')}\n${body}${quoteWarn}${snapshotFooterLine(opts.snapshotFooter)}`;
 }
 
 export function accountTypeLabelKo(accountType: string): string {

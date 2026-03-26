@@ -1,11 +1,8 @@
-import { GoogleGenAI } from '@google/genai';
 import * as dotenv from 'dotenv';
 import { logger } from './logger';
+import { generateGeminiResponse } from './geminiLlmService';
 
 dotenv.config();
-
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
-const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
 export type TrendTopicKind = 'kpop' | 'drama' | 'sports' | 'hot' | 'free';
 
@@ -93,9 +90,9 @@ export async function generateTrendSpecialistResponse(topic: TrendTopicKind, use
   const contents = `${cfg.systemPrompt}\n\n[질문/요청]\n${userQuery}`;
 
   try {
-    const response = await ai.models.generateContent({
+    const response = await generateGeminiResponse({
       model: 'gemini-2.5-flash',
-      contents
+      prompt: contents
     });
     return response.text || '';
   } catch (e: any) {
