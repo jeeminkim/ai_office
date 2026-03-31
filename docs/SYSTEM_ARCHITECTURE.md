@@ -93,7 +93,8 @@
 
 ### 4) 저장 및 피드백 루프
 - **버튼 `customId`**: `feedback:save:{chatHistoryId}:{analysisType}:{feedbackType}:{personaKey}` (`getFeedbackButtonsRow` in `index.ts`).
-- **의사결정 버튼 `customId`**: `decision:select|{chatHistoryId}|{optionIndex}` — 본문에서 `extractDecisionOptions`로 라벨 복원. `broadcastAgentResponse`가 휴리스틱 매칭 시 **피드백 행 위에** 최대 4개 버튼 행을 추가한다.
+- **의사결정 버튼 `customId`**: `decision:select|{snapshotUuid}|{optionIndex}` — 브로드캐스트 시 `decision_snapshots`에 옵션 JSON 저장, 클릭 시 `getDecisionSnapshotById`로 복원(본문 재파싱 없음). `broadcastAgentResponse`가 휴리스틱 매칭 시 **피드백 행 위에** 최대 4개 버튼 행을 추가한다.
+- **선택 후 실행**: `handleDecisionButtonInteraction` → `insertDecisionHistoryRow`(`DECISION_PERSISTED`) → `executeDecisionAfterSelection`(`decisionExecutionService.ts`) — **자동 매매 없음**. `immediate_sell`/`staged_sell`은 `buildRebalancePlanAppService`에 `advisoryOverride`(EXIT/REDUCE)로 그림자 리밸 텍스트·선택적 `rebalance_plans` 저장, `cio_followup`은 Gemini 요약, `clarify`는 다음 질문 템플릿. 채널에 후속 메시지 필수.
 - **`analysis_feedback_history` 키**: integer `chat_history.id`는 **`chat_history_ref`(TEXT)** 로 저장하는 경로를 우선하고, UUID FK `chat_history_id`에는 넣지 않는다(레거시 스키마 호환을 위해 insert 실패 시에만 `chat_history_id` 재시도 — `feedbackService.ts`).
 - **`analysisType`**: **customId 파싱값이 단일 소스**이다. `chat_history.debate_type` 컬럼을 조회·덮어쓰기에 쓰지 않는다(`findChatHistoryById`는 `id`/`user_id` 검증용 컬럼만). SQL로 `debate_type`을 복구하지 않고 code-side로 정렬.
 - **처리 순서**: 버튼 클릭 → `interactionCreate` → `safeDeferReply` → `handleFeedbackSaveButtonInteraction` → `saveAnalysisFeedbackHistory`(`feedbackService.ts`) → `ingestPersonaFeedback`(`feedbackIngestionService.ts`, claim 매핑·`claim_feedback`). `claim_id`가 UUID가 아닌 경우 `claim_feedback` 삽입은 건너뛰고(non-fatal) 피드백 이력은 유지. 동일 `feedbackType` 연타는 서비스 계층 중복 방어 + UX 메시지.

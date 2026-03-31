@@ -82,6 +82,12 @@ import {
     buildDecisionButtonsRow,
     logDecisionPromptDetected
 } from './decisionPrompt';
+import { executeDecisionAfterSelection } from './decisionExecutionService';
+import {
+    insertDecisionSnapshot,
+    getDecisionSnapshotById,
+    insertDecisionHistoryRow
+} from './src/repositories/decisionRepository';
 import {
     handleInstrumentConfirm,
     handleInstrumentCancel,
@@ -904,6 +910,12 @@ async function sendPostNavigationReply(sourceInteraction: Interaction | Message,
     }
 }
 
+function decisionTopicHintForContext(analysisType: string): string {
+    if (/PORTFOLIO|DEBATE|COMMITTEE|AI_|REBALANCE/i.test(analysisType)) return 'rebalance_strategy';
+    if (/TREND/i.test(analysisType)) return 'trend';
+    return 'general';
+}
+
 async function broadcastAgentResponse(
     userId: string,
     agentName: string,
@@ -911,7 +923,7 @@ async function broadcastAgentResponse(
     content: string,
     sourceInteraction: Interaction | Message,
     feedbackRow?: ActionRowBuilder<ButtonBuilder> | null,
-    decisionCtx?: { chatHistoryId: number; analysisType: string } | null
+    decisionCtx?: { chatHistoryId: number; analysisType: string; personaKey?: PersonaKey } | null
 ) {
     let finalContent = content;
     let components: ActionRowBuilder<ButtonBuilder>[] = [];
@@ -925,7 +937,18 @@ async function broadcastAgentResponse(
     if (decisionCtx && isDecisionPrompt(finalContent)) {
         const opts = extractDecisionOptions(finalContent);
         logDecisionPromptDetected(decisionCtx.chatHistoryId, decisionCtx.analysisType, opts);
-        decisionRows.push(buildDecisionButtonsRow(decisionCtx.chatHistoryId, decisionCtx.analysisType, opts));
+        const snap = await insertDecisionSnapshot({
+            discordUserId: userId,
+            chatHistoryRef: String(decisionCtx.chatHistoryId),
+            analysisType: decisionCtx.analysisType,
+            personaKey: decisionCtx.personaKey ?? null,
+            options: opts
+        });
+        if (snap?.id) {
+            decisionRows.push(buildDecisionButtonsRow(snap.id, opts));
+        } else {
+            logger.warn('DECISION', 'decision_snapshots insert failed; decision buttons omitted');
+        }
     }
 
     const originalLen = finalContent.length;
@@ -1083,7 +1106,11 @@ async function runTrendAnalysis(
         const feedbackRow = out.chatHistoryId ? getFeedbackButtonsRow(out.chatHistoryId, out.analysisType, 'TREND') : null;
         const decisionCtx =
             out.chatHistoryId != null
-                ? { chatHistoryId: out.chatHistoryId, analysisType: out.analysisType }
+                ? {
+                      chatHistoryId: out.chatHistoryId,
+                      analysisType: out.analysisType,
+                      personaKey: 'TREND' as PersonaKey
+                  }
                 : null;
         await broadcastAgentResponse(userId, out.agentLabel, out.avatarUrl, out.text, sourceInteraction, feedbackRow, decisionCtx);
         await sendPostNavigationReply(sourceInteraction, 'trend');
@@ -1224,7 +1251,11 @@ async function runPortfolioDebate(userId: string, userQuery: string, sourceInter
                 : null;
             const decisionCtx =
                 result.chatHistoryId != null
-                    ? { chatHistoryId: result.chatHistoryId, analysisType: result.analysisType }
+                    ? {
+                          chatHistoryId: result.chatHistoryId,
+                          analysisType: result.analysisType,
+                          personaKey: seg.key
+                      }
                     : null;
             await broadcastAgentResponse(
                 userId,
@@ -1243,7 +1274,11 @@ async function runPortfolioDebate(userId: string, userQuery: string, sourceInter
             }
             const decisionCtxSummary =
                 result.chatHistoryId != null
-                    ? { chatHistoryId: result.chatHistoryId, analysisType: result.analysisType }
+                    ? {
+                          chatHistoryId: result.chatHistoryId,
+                          analysisType: result.analysisType,
+                          personaKey: 'CIO' as PersonaKey
+                      }
                     : null;
             await broadcastAgentResponse(
                 userId,
@@ -1270,7 +1305,11 @@ async function runOpenTopicDebate(userId: string, userQuery: string, sourceInter
             const feedbackRow = out.chatHistoryId ? getFeedbackButtonsRow(out.chatHistoryId, out.analysisType, b.personaKey) : null;
             const decisionCtx =
                 out.chatHistoryId != null
-                    ? { chatHistoryId: out.chatHistoryId, analysisType: out.analysisType }
+                    ? {
+                          chatHistoryId: out.chatHistoryId,
+                          analysisType: out.analysisType,
+                          personaKey: b.personaKey
+                      }
                     : null;
             await broadcastAgentResponse(userId, b.agentName, b.avatarUrl, b.text, sourceInteraction, feedbackRow, decisionCtx);
         }
@@ -1483,8 +1522,40 @@ client.on('messageCreate', async (message: Message) => {
 async function handleDecisionButtonInteraction(interaction: any): Promise<void> {
     const cid = interaction.customId as string;
     const discordUserId = getDiscordUserId(interaction.user);
-    const m = /^decision:select\|(\d+)\|(\d+)$/.exec(cid);
-    if (!m) {
+    const mUuid = /^decision:select\|([0-9a-f-]{36})\|(\d+)$/i.exec(cid);
+    const mLegacy = /^decision:select\|(\d+)\|(\d+)$/.exec(cid);
+
+    let chatHistoryId = 0;
+    let optIndex = 0;
+    let options: string[] = [];
+    let analysisType = '';
+    let personaKey: string | null = null;
+
+    if (mUuid) {
+        const snapshotId = mUuid[1];
+        optIndex = Number(mUuid[2]);
+        const snap = await getDecisionSnapshotById(snapshotId);
+        if (!snap || snap.discord_user_id !== discordUserId) {
+            logger.warn('DECISION', 'snapshot missing or user mismatch', { snapshotId });
+            await safeDeferReply(interaction, {});
+            await interaction.editReply({
+                content: '요청을 처리할 수 없습니다. 잠시 후 다시 시도해 주세요.'
+            });
+            return;
+        }
+        options = snap.options;
+        analysisType = snap.analysis_type ?? '';
+        personaKey = snap.persona_key;
+        const ref = snap.chat_history_ref;
+        chatHistoryId = ref ? parseInt(ref, 10) : 0;
+    } else if (mLegacy) {
+        chatHistoryId = Number(mLegacy[1]);
+        optIndex = Number(mLegacy[2]);
+        const msg = String(interaction.message?.content || '');
+        options = extractDecisionOptions(msg);
+        analysisType = '';
+        personaKey = null;
+    } else {
         logger.warn('DECISION', 'invalid decision customId', { cid });
         await safeDeferReply(interaction, {});
         await interaction.editReply({
@@ -1492,8 +1563,8 @@ async function handleDecisionButtonInteraction(interaction: any): Promise<void> 
         });
         return;
     }
-    const chatHistoryId = Number(m[1]);
-    const optIndex = Number(m[2]);
+
+    const selectedOption = options[optIndex] ?? options[0] ?? '선택';
     if (!Number.isFinite(chatHistoryId) || chatHistoryId <= 0 || !Number.isFinite(optIndex)) {
         await safeDeferReply(interaction, {});
         await interaction.editReply({
@@ -1501,10 +1572,9 @@ async function handleDecisionButtonInteraction(interaction: any): Promise<void> 
         });
         return;
     }
-    const msg = String(interaction.message?.content || '');
-    const options = extractDecisionOptions(msg);
-    const selectedOption = options[optIndex] ?? options[0] ?? '선택';
+
     await safeDeferReply(interaction, {});
+
     logger.info('DECISION', 'DECISION_SELECTED', {
         chatHistoryId,
         userId: discordUserId,
@@ -1512,9 +1582,62 @@ async function handleDecisionButtonInteraction(interaction: any): Promise<void> 
         optionIndex: optIndex,
         options: options.slice(0, 4)
     });
-    await interaction.editReply({
-        content: `**선택 완료:** ${selectedOption}을(를) 반영합니다.`
+
+    const decisionContext: Record<string, unknown> = {
+        options,
+        persona: personaKey,
+        topic: decisionTopicHintForContext(analysisType || 'UNKNOWN')
+    };
+    if (mUuid) {
+        decisionContext.snapshot_id = mUuid[1];
+    }
+
+    await insertDecisionHistoryRow({
+        discordUserId,
+        chatHistoryRef: String(chatHistoryId),
+        analysisType: analysisType || null,
+        selectedOption,
+        optionIndex: optIndex,
+        decisionContext
     });
+
+    const userMode = await loadUserMode(discordUserId);
+    let exec: { replyAck: string; followUpMarkdown: string; execution_type: string };
+    try {
+        exec = await executeDecisionAfterSelection({
+            discordUserId,
+            chatHistoryId,
+            analysisType: analysisType || 'UNKNOWN',
+            personaKey,
+            selectedOption,
+            optionIndex: optIndex,
+            options,
+            decisionContext,
+            userMode
+        });
+    } catch (e: any) {
+        logger.warn('DECISION', 'executeDecisionAfterSelection threw', { message: e?.message || String(e) });
+        exec = {
+            replyAck: `**선택 완료:** ${selectedOption}을(를) 반영합니다.`,
+            followUpMarkdown:
+                '후속 안내를 불러오는 중 문제가 있었습니다. 잠시 후 다시 시도해 주세요. _(자동 매매 없음)_',
+            execution_type: 'error'
+        };
+    }
+
+    await interaction.editReply({ content: exec.replyAck.slice(0, 1900) });
+
+    const ch = interaction.channel as { send?: (p: { content: string }) => Promise<unknown> } | undefined;
+    if (ch?.send && exec.followUpMarkdown) {
+        const chunks = splitDiscordMessage(exec.followUpMarkdown, 1800);
+        for (const part of chunks) {
+            try {
+                await ch.send({ content: part });
+            } catch (e: any) {
+                logger.warn('DECISION', 'decision followUp channel send failed', { message: e?.message || String(e) });
+            }
+        }
+    }
 }
 
 async function handleFeedbackSaveButtonInteraction(interaction: any): Promise<void> {

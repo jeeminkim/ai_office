@@ -23,6 +23,11 @@ export type BuildRebalancePlanParams = {
   minTradeKrw?: number;
   /** Skip DB persist (dry run) */
   dryRun?: boolean;
+  /**
+   * Advisory-only tilt for planning (does not change stored committee artifact).
+   * Used when user picks e.g. immediate vs staged sell from Discord buttons.
+   */
+  advisoryOverride?: { decision: DecisionType; normalizedScore?: number };
 };
 
 export type RebalancePlanLine = {
@@ -249,8 +254,10 @@ export async function buildRebalancePlanAppService(params: BuildRebalancePlanPar
   const beforeW: Record<string, number> = {};
   for (const p of positions) beforeW[p.symbol] = round2(p.weight_pct);
 
-  const decision = params.decisionArtifact?.decision ?? null;
-  const norm = params.decisionArtifact?.normalizedScore ?? 0;
+  const decision =
+    params.advisoryOverride?.decision ?? params.decisionArtifact?.decision ?? null;
+  const norm =
+    params.advisoryOverride?.normalizedScore ?? params.decisionArtifact?.normalizedScore ?? 0;
 
   if (!positions.length || totalMv <= 0) {
     const empty: BuildRebalancePlanResult = {

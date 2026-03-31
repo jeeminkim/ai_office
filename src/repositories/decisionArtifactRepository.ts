@@ -1,5 +1,5 @@
 import { logger } from '../../logger';
-import type { CommitteeVoteResult, DecisionArtifact } from '../contracts/decisionContract';
+import type { CommitteeVoteResult, DecisionArtifact, DecisionType } from '../contracts/decisionContract';
 import {
   DECISION_CREATED_BY_ENGINE,
   DECISION_ENGINE_VERSION,
@@ -77,6 +77,34 @@ export async function insertDecisionArtifactRow(params: {
     decision: params.artifact.decision
   });
   return { status: 'inserted', artifactId };
+}
+
+/** Latest committee artifact for a chat (shadow rebalance / advisory follow-up). */
+export async function getLatestDecisionArtifactForChat(params: {
+  chatHistoryId: number;
+  analysisType: string;
+}): Promise<{ artifactId: string; decision: DecisionType; normalizedScore: number } | null> {
+  const { data, error } = await repoSupabase
+    .from('decision_artifacts')
+    .select('id, final_decision, normalized_score')
+    .eq('chat_history_id', params.chatHistoryId)
+    .eq('analysis_type', params.analysisType)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error || !data) {
+    if (error) {
+      logger.warn('DECISION_ENGINE', 'getLatestDecisionArtifactForChat failed', { message: error.message });
+    }
+    return null;
+  }
+  const row = data as { id: unknown; final_decision: unknown; normalized_score: unknown };
+  return {
+    artifactId: String(row.id),
+    decision: row.final_decision as DecisionType,
+    normalizedScore: Number(row.normalized_score ?? 0)
+  };
 }
 
 export async function insertCommitteeVoteLogs(params: {

@@ -35,6 +35,14 @@
 - ...
 ```
 
+## 2026-03-30
+
+### Added
+- **의사결정 영구 저장·실행**: `docs/sql/decision_history.sql` — `decision_snapshots`, `decision_history`. `src/repositories/decisionRepository.ts`. 버튼 `decision:select|{uuid}|{idx}` + `decisionExecutionService.ts`(`executeDecisionAfterSelection`, `DECISION_EXECUTION_STARTED`/`COMPLETED`). `getLatestDecisionArtifactForChat`(`decisionArtifactRepository.ts`). `buildRebalancePlanAppService` `advisoryOverride`(EXIT/REDUCE).
+
+### Docs
+- `README.md`, `docs/SYSTEM_ARCHITECTURE.md`, `docs/DATABASE_SCHEMA.md`, `docs/OPERATIONS_RUNBOOK.md`, `docs/TEST_CHECKLIST.md` — decision → shadow execution 흐름.
+
 ## 2026-03-28
 
 ### Added
@@ -49,7 +57,7 @@
 - `src/finance/cashflowCategories.ts` 표준 8종 + `parseCashflowFlowType`; `agents.ts` 스냅샷에 `formatCashflowSnapshotLine`
 - `src/services/instrumentValidation.ts` + `src/interactions/instrumentConfirmationHandler.ts` + `src/repositories/instrumentCandidateRepository.ts` — 종목 추가 후보 저장 후 `instr:confirm`/`instr:cancel`/`instr:pick`로만 확정
 - `src/finance/expenseInstallment.ts` — 지출 모달 할부 한 줄 파싱
-- **의사결정 버튼**: `decisionPrompt.ts` 휴리스틱·`extractDecisionOptions`·`broadcastAgentResponse`에 `decision:select|{chatHistoryId}|{idx}` 행 부착, `index.ts` `handleDecisionButtonInteraction` — `DECISION` 로그(`DECISION_PROMPT detected`는 `analysisPipelineService` persist, `DECISION_OPTIONS extracted` / `DECISION_SELECTED`는 Discord 경로)
+- **의사결정 버튼(초기)**: `decisionPrompt.ts` 휴리스틱·`extractDecisionOptions`·`broadcastAgentResponse`에 선택 행 부착, `index.ts` `handleDecisionButtonInteraction` — `DECISION` 로그(`DECISION_PROMPT detected`는 `analysisPipelineService` persist, `DECISION_OPTIONS extracted` / `DECISION_SELECTED`는 Discord 경로). (2026-03-30 이후 스냅샷 UUID·`decision_history`·`decisionExecutionService` 참고.)
 
 ### Fixed
 - **피드백·claim UUID**: `chat_history.id`(integer)를 UUID FK에 넣지 않도록 `analysis_feedback_history`에 **`chat_history_ref`(TEXT)** 우선 저장(`feedbackService.ts`, `feedbackRepository.ts`, `docs/sql/feedback_chat_history_ref.sql`). `mapped_claim_id`는 형식이 UUID일 때만 저장. `claim_feedback` insert가 UUID 오류면 non-fatal 스킵(`claimLedgerService.ts`, `feedbackIngestionService.ts`). 피드백 버튼 UX 문구 완화(`index.ts`)

@@ -200,8 +200,11 @@ KR 종목은 조회 시 **`quote_symbol` 보정**(예: KOSPI→`.KS`, KOSDAQ→`
 ## Decision prompt buttons (Discord)
 
 - **목적**: LLM이 “원하시나요 / 선택 / vs …” 식으로 선택을 요구할 때 **빈 텍스트만 보내지 않고** 채널에 **선택 버튼**을 붙인다(`decisionPrompt.ts` 휴리스틱 + `extractDecisionOptions`).
-- **customId**: `decision:select|{chatHistoryId}|{optionIndex}` — 클릭 시 메시지 본문을 다시 파싱해 라벨을 복원한다(Discord customId 길이 제한 대응).
-- **처리**: `interactionCreate`에서 `decision:select|` → `handleDecisionButtonInteraction` — **ephemeral 아님**(채널에 “선택 완료”가 보이게). 로그: `DECISION` 스코프 `DECISION_PROMPT detected`(파이프라인 persist), `DECISION_OPTIONS extracted` / `DECISION_SELECTED`(브로드캐스트·클릭).
+- **옵션 스냅샷**: 브로드캐스트 직전 `decision_snapshots` 행에 `options` JSON을 저장하고, 버튼 `customId`는 `decision:select|{snapshotUuid}|{idx}` — 클릭 시 **DB 스냅샷**으로 라벨을 복원한다(본문 재파싱 금지).
+- **저장**: 클릭 시 `decision_history`에 `selected_option`, `option_index`, `decision_context`(options·persona·topic 등) 저장. 로그 `DECISION_PERSISTED`.
+- **후속(실행)**: `decisionExecutionService.ts` — **자동 매매 없음**. `immediate_sell` / `staged_sell` / `hold` 등 분류 후 **그림자 리밸**(`buildRebalancePlanAppService`, `rebalance_plans` 저장 가능) 또는 **CIO 요약(Gemini)** 또는 **다음 질문 템플릿**. 채널에 “선택 완료” 응답 후 **즉시 후속 메시지**로 전달. 로그: `DECISION_EXECUTION_STARTED` / `DECISION_EXECUTION_COMPLETED`.
+- **마이그레이션**: `docs/sql/decision_history.sql` (`decision_snapshots`, `decision_history`).
+- **처리**: `interactionCreate`에서 `decision:select|` → `handleDecisionButtonInteraction` — **ephemeral 아님**(선택 완료가 채널에 보임). 로그: `DECISION` 스코프 `DECISION_PROMPT detected`(파이프라인 persist), `DECISION_OPTIONS extracted` / `DECISION_SELECTED`(브로드캐스트·클릭).
 - **배치**: `broadcastAgentResponse` 첫 청크에 `[NO_DATA 행] → [의사결정 행] → [피드백 행]` 순으로 합친다.
 
 ### Feedback → 의사결정 소프트 보정 (포트폴리오 5인 토론)

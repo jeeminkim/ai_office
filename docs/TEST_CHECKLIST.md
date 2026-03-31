@@ -53,7 +53,9 @@
 
 ## 5e. 의사결정 버튼(Decision prompt)
 - [ ] “원하시나요” 등 휴리스틱이 포함된 응답에 **선택 버튼** 행이 붙고, 로그에 `DECISION_PROMPT detected`(파이프라인) / `DECISION_OPTIONS extracted`(브로드캐스트)가 남는지 확인
-- [ ] `customId` `decision:select|{chatHistoryId}|{idx}` 클릭 → 채널에 **선택 완료** 표시(ephemeral 아님), `DECISION_SELECTED` 로그
+- [ ] `docs/sql/decision_history.sql` 적용 후 `decision_snapshots` / `decision_history` 사용 가능
+- [ ] `customId` `decision:select|{snapshotUuid}|{idx}` 클릭 → 채널에 **선택 완료** 표시(ephemeral 아님), `DECISION_SELECTED` → `DECISION_PERSISTED`.
+- [ ] 클릭 직후 **후속 채널 메시지**가 반드시 오는지(그림자 리밸 / CIO 요약 / 다음 질문). `DECISION_EXECUTION_STARTED` / `DECISION_EXECUTION_COMPLETED` 로그. **자동 매매·trade_history 미변경** 확인.
 - [ ] 선택지 추출 실패 시에도 최소 **예 / 아니오** 버튼이 붙는지 확인(`extractDecisionOptions` fallback)
 
 ## 5b. 피드백 소프트 보정 (포트폴리오 토론)

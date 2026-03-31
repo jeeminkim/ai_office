@@ -91,6 +91,7 @@ pm2 restart ai-office
 8. 피드백이 붙은 메시지가 **webhook 전용이 아닌** 일반 채널 메시지인지 확인(버튼이 실제로 눌리는지 — `README.md` “Feedback buttons” 절 참고)
 9. 로그에 `column chat_history.debate_type does not exist` 가 **더 이상 나오지 않는지** 확인(피드백 경로는 customId의 `analysisType`만 사용).
 10. Postgres `invalid input syntax for type uuid` 가 **피드백 버튼 경로**에서 더 이상 반복되지 않는지 확인(integer ID를 UUID 컬럼에 넣지 않음).
+11. `docs/sql/decision_history.sql` 적용 후 `decision_snapshots` / `decision_history` 확인. 의사결정 버튼 클릭 시 `DECISION_PERSISTED`, 직후 채널에 **후속 메시지**(그림자 리밸 또는 CIO/다음 질문), 로그 `DECISION_EXECUTION_STARTED` / `DECISION_EXECUTION_COMPLETED`. **자동 매매 없음**(advisory·shadow plan만).
 
 ### 6.2 피드백 소프트 보정(포트폴리오 토론)
 1. 포트폴리오 토론 완료 후 로그에 `FEEDBACK_CALIBRATION` / `applied`가 **페르소나당** 남는지 확인(`claimCount`, `avgBaseScore`, `avgAdjustedScore`, `safetyFloorTriggered`).

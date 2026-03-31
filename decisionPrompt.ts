@@ -69,19 +69,18 @@ export function extractDecisionOptions(text: string): string[] {
   return ['예', '아니오'];
 }
 
-/** 인덱스만 customId에 넣고, 클릭 시 메시지 본문에서 extractDecisionOptions 로 라벨 복원 (≤100자 보장) */
-export function buildDecisionButtonsRow(
-  chatHistoryId: number,
-  _analysisType: string,
-  options: string[]
-): ActionRowBuilder<ButtonBuilder> {
+/**
+ * customId: decision:select|{snapshotUuid}|{idx} — 라벨은 DB `decision_snapshots.options` 스냅샷으로 복원 (본문 재파싱 불필요).
+ * Discord customId ≤100자: UUID(36) + 접두/인덱스로 여유 있음.
+ */
+export function buildDecisionButtonsRow(snapshotId: string, options: string[]): ActionRowBuilder<ButtonBuilder> {
   const row = new ActionRowBuilder<ButtonBuilder>();
   const cleaned = options.map(o => String(o || '').trim()).filter(s => s.length >= 1);
   const use = cleaned.length >= 2 ? cleaned.slice(0, 4) : ['예', '아니오'];
   const n = Math.min(4, use.length);
   for (let i = 0; i < n; i++) {
     const label = use[i].slice(0, 80);
-    const cid = `decision:select|${chatHistoryId}|${i}`;
+    const cid = `decision:select|${snapshotId}|${i}`;
     row.addComponents(
       new ButtonBuilder().setCustomId(cid).setLabel(label).setStyle(ButtonStyle.Primary)
     );
