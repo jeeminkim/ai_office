@@ -7,6 +7,7 @@
 
 ## 0. 자동 점검 (로컬/CI)
 - [ ] `npm run build`
+- [ ] **Interaction registry 스모크(선택)**: `npm run smoke:interaction` — 라우트 개수·이름 출력(Supabase dummy env). `npm run smoke:followup-routes`, `npm run smoke:panel-restore`(경로 안내)
 - [ ] **Control Panel(선택)**: `npm run control-panel` → 브라우저 `http://127.0.0.1:7788` 에서 **상태판**(실행/heartbeat/`stopPhase`/마지막 중지·force fallback·다단계 검증·검사 요약, 로그 **경로 안내**). 화면에 로그 raw·stderr 원문 대량 출력 없음. `logs/control-panel/control-panel.log_*` 에 `stop_attempt_*`·`stop_force_fallback_*`·`post_stop_verification`(attemptNo 1~3)·`stop_final_status` 확인. Windows: graceful(`child_sigterm`) 후 필요 시 자동 `/F` (안전 식별 시만). 프로세스 검사·kill
 - [ ] `npm run check:schema-contract`
 - [ ] `npm run check:phase1-structure` (Supabase URL 미설정 시 dummy env로 모듈 로드만 검증)
@@ -14,6 +15,7 @@
 - [ ] `npm run check:decision-engine` (Phase 2 위원회 투표 + veto + unique 위반 처리 스모크; **기본 Phase 2 테이블 적용 후** `docs/sql/append_phase2_decision_tables_hardening.sql` 실행 시 persistence·duplicate 검증까지 가능)
 
 ## 1. 기본 기능 테스트
+- [ ] `interactionCreate` 경로: 버튼·스트링 셀렉트·모달 제출 시 `INTERACTION` 로그에 `route matched` 가 남는지(배포 후 선택 확인)
 - [ ] 봇 기동 후 메인 패널 렌더링 (`panel:main:*`)
 - [ ] 포트폴리오 보기(일반계좌) 정상 응답
 - [ ] 전체 자산 보기 정상 응답

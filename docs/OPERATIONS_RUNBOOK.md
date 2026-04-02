@@ -157,6 +157,12 @@ pm2 restart ai-office
 2. **상세 로그 요약** / **조치 방법**은 동일 분석 결과의 보기 전환. 민감 정보가 포함될 수 있으면 에페메럴·관리 채널에서만 사용 권장.
 3. 코드: `logAnalysisService.ts`, 버튼 `panel:system:check|detail|actions` — `DATA_CENTER` `system_log_analysis` 로그.
 
+### 6.1.4 Interaction registry / entrypoint (리팩토링)
+1. `interactionCreate` 분기는 `src/discord/handlers/interactionCreate/buildInteractionRoutes.ts`에 **`InteractionRoute`** 목록으로 등록되어 있으며, `index.ts`는 **`dispatchRoutesInOrder`**만 호출한다.
+2. 라우트가 처리되면 로그에 `INTERACTION` `route matched` `{ route: "<name>" }`가 남는다(디버깅용).
+3. 배포 후 회귀 시: **의사결정·피드백·follow-up·포트폴리오·모달(지출/현금흐름)** 각각 한 번씩 클릭해 기존과 동일한지 확인한다.
+4. 로컬에서 라우트 목록만 보려면: `npm run smoke:interaction`(dummy Supabase env 선로드). Follow-up 라우트 이름: `npm run smoke:followup-routes`.
+
 **Post-response navigation**
 1. 포트폴리오 조회/계좌 선택 직후, AI 토론·트렌드·데이터 센터·오픈 토픽 완료 직후 **추가 메시지**에 메인 메뉴 버튼이 보이는지 확인한다.
 2. 로그에 `post_response_navigation_attached`(mode: `followUp` 또는 `channel_send`)가 남는지 확인한다. 실패 시 `post_response_navigation_failed`.

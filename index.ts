@@ -10,9 +10,6 @@ import {
     EmbedBuilder,
     Interaction,
     Events,
-    ModalBuilder,
-    TextInputBuilder,
-    TextInputStyle,
     InteractionType,
     StringSelectMenuBuilder
 } from 'discord.js';
@@ -37,11 +34,9 @@ import {
 } from './panelManager';
 import { buildPortfolioSnapshot } from './portfolioService';
 import { resolveInstrumentMetadata } from './instrumentRegistry';
-import { trendTopicFromCustomId, type TrendTopicKind } from './trendAnalysis';
+import type { TrendTopicKind } from './trendAnalysis';
 import { learnBehaviorFromSnapshots, learnBehaviorFromTrades, loadUserProfile } from './profileService';
-import { saveAnalysisFeedbackHistory, type FeedbackType } from './feedbackService';
-import { ingestPersonaFeedback } from './feedbackIngestionService';
-import { findChatHistoryById } from './src/repositories/chatHistoryRepository';
+import type { FeedbackType } from './feedbackService';
 import {
     recordBuyTrade,
     recordSellTrade,
@@ -57,15 +52,8 @@ import { buildPortfolioDiscordMessage, accountTypeLabelKo } from './portfolioUx'
 import type { PortfolioSnapshot } from './portfolioService';
 import { maybeStoreDailyPortfolioSnapshotHistory } from './snapshotService';
 import { decideOrchestratorRoute, logOrchestratorDecision } from './orchestrator';
-import { routeEarlyButtonInteraction } from './src/interactions/interactionRouter';
 import { runDataCenterAppService } from './src/application/runDataCenterAppService';
 import { splitDiscordMessage, chooseInteractionRoute } from './discordResponseUtils';
-import {
-    analyzeLogs,
-    generateSystemReport,
-    generateDetailView,
-    generateActionsView
-} from './logAnalysisService';
 import { generateGeminiResponse } from './geminiLlmService';
 import type { PersonaKey } from './analysisTypes';
 import { insertChatHistoryWithLegacyFallback } from './src/repositories/chatHistoryRepository';
@@ -75,22 +63,10 @@ import {
     personaKeyToPersonaName
 } from './src/discord/analysisFormatting';
 import { analyzeFollowupPrompt, buildFollowupComponentRows } from './followupPromptService';
-import {
-    insertFollowupSnapshot,
-    getFollowupSnapshotById,
-    type FollowupSnapshotRow
-} from './src/repositories/followupRepository';
+import { insertFollowupSnapshot } from './src/repositories/followupRepository';
 import { runPortfolioDebateAppService } from './src/application/runPortfolioDebateAppService';
 import { formatDecisionSummaryForDiscord } from './src/application/runDecisionEngineAppService';
 import { buildRebalancePlanAppService } from './src/application/buildRebalancePlanAppService';
-import {
-    dismissRebalancePlanHold,
-    executeRebalancePlanComplete,
-    renderPlanItemsText
-} from './src/application/executeRebalancePlanAppService';
-import { runClaimOutcomeAuditAppService } from './src/application/runClaimOutcomeAuditAppService';
-import { getRebalancePlanById, getLatestPendingRebalancePlan } from './src/repositories/rebalancePlanRepository';
-import { buildPersonaScorecards, formatPersonaScorecardDiscord } from './src/services/personaScorecardService';
 import { runTrendAnalysisAppService } from './src/application/runTrendAnalysisAppService';
 import { runOpenTopicDebateAppService } from './src/application/runOpenTopicDebateAppService';
 import {
@@ -99,24 +75,15 @@ import {
     buildDecisionButtonsRow,
     logDecisionPromptDetected
 } from './decisionPrompt';
-import { executeDecisionAfterSelection } from './decisionExecutionService';
-import {
-    insertDecisionSnapshot,
-    getDecisionSnapshotById,
-    insertDecisionHistoryRow
-} from './src/repositories/decisionRepository';
-import {
-    handleInstrumentConfirm,
-    handleInstrumentCancel,
-    handleInstrumentPick
-} from './src/interactions/instrumentConfirmationHandler';
+import { insertDecisionSnapshot } from './src/repositories/decisionRepository';
 import { parseCashflowFlowType } from './src/finance/cashflowCategories';
-import { parseInstallmentLine } from './src/finance/expenseInstallment';
-import {
-    tryHandlePortfolioButton,
-    tryHandlePortfolioModalSubmit,
-    tryHandlePortfolioStringSelect
-} from './src/interactions/portfolioInteractionHandler';
+import { createPanelAdapter } from './src/discord/adapters/panelAdapter';
+import type { DiscordInteractionContext, UserRiskMode } from './src/discord/InteractionContext';
+import { personaKeyToDisplayNameForFeedback } from './src/discord/personaDisplay';
+import { parsePositiveAmount, parseNumberStrict, normalizeSymbol, sanitizeDescription } from './src/discord/formParsing';
+import { logSchemaSafeInsertFailure } from './src/discord/schemaInsertErrors';
+import { dispatchRoutesInOrder } from './src/discord/interactionRegistry';
+import { buildInteractionRoutes } from './src/discord/handlers/interactionCreate/buildInteractionRoutes';
 
 logger.info('BOOT', 'index initialization started');
 
@@ -158,36 +125,8 @@ const client = new Client({
 const webhook = new WebhookClient({ url: WEBHOOK_URL });
 startHeartbeat();
 
-function parseNumberStrict(value: string): number | null {
-    if (!value) return null;
-    const parsed = parseFloat(value);
-    return isNaN(parsed) ? null : parsed;
-}
-
-function normalizeSymbol(value: string): string {
-    return (value || '').trim().toUpperCase();
-}
-
 function formatKrw(v: number): string {
     return `${Math.round(v).toLocaleString('ko-KR')}원`;
-}
-
-/** `analysis_claims.persona_name` / `src/discord/analysisFormatting.ts` 과 동일 계열로 맞춤 (claim 매핑 정합성). */
-function personaKeyToDisplayNameForFeedback(personaKey: string): string {
-    const k = personaKey as PersonaKey;
-    switch (k) {
-        case 'RAY': return 'Ray Dalio (PB)';
-        case 'HINDENBURG': return 'HINDENBURG_ANALYST';
-        case 'JYP': return 'JYP (Analyst)';
-        case 'SIMONS': return 'James Simons (Quant)';
-        case 'DRUCKER': return 'Peter Drucker (COO)';
-        case 'CIO': return 'Stanley Druckenmiller (CIO)';
-        case 'TREND': return 'Trend Analyst';
-        case 'OPEN_TOPIC': return 'Open Topic Analyst';
-        case 'THIEL': return 'Peter Thiel (Data Center)';
-        case 'HOT_TREND': return '전현무 · 핫 트렌드 분석';
-        default: return personaKey || 'Unknown';
-    }
 }
 
 function getFeedbackButtonsRow(chatHistoryId: number, analysisType: string, personaKey: PersonaKey): ActionRowBuilder<ButtonBuilder> {
@@ -226,38 +165,6 @@ function getDiscordUserId(user: { id: string }): string {
 /** 고급 매수/매도: 모달 직전에 선택한 계좌 (단일 프로세스 가정) */
 const pendingBuyAccountId = new Map<string, string>();
 const pendingSellAccountId = new Map<string, string>();
-
-function parsePositiveAmount(value: string): number | null {
-    const amount = parseNumberStrict(value);
-    if (amount === null || amount <= 0) return null;
-    return amount;
-}
-
-function sanitizeDescription(value: string): string {
-    return (value || '').trim();
-}
-
-function isSchemaMismatchError(error: any): boolean {
-    const message = String(error?.message || '').toLowerCase();
-    return (
-        message.includes('schema cache') ||
-        message.includes('column') ||
-        message.includes('does not exist') ||
-        message.includes('could not find')
-    );
-}
-
-function logSchemaSafeInsertFailure(table: string, payload: Record<string, unknown>, error: any) {
-    const payloadKeys = Object.keys(payload);
-    const scope = `DB][${table}][insert`;
-    logger.error(scope, 'insert failed', {
-        table,
-        payloadKeys,
-        errorMessage: error?.message || String(error),
-        errorCode: error?.code || null,
-        hint: isSchemaMismatchError(error) ? 'column mismatch suspected: check DB schema and payload keys' : null
-    });
-}
 
 type PortfolioQueryUiMode = 'default' | 'all' | 'retirement' | 'account';
 
@@ -964,12 +871,6 @@ async function sendPostNavigationReply(sourceInteraction: Interaction | Message,
     }
 }
 
-function decisionTopicHintForContext(analysisType: string): string {
-    if (/PORTFOLIO|DEBATE|COMMITTEE|AI_|REBALANCE/i.test(analysisType)) return 'rebalance_strategy';
-    if (/TREND/i.test(analysisType)) return 'trend';
-    return 'general';
-}
-
 async function broadcastAgentResponse(
     userId: string,
     agentName: string,
@@ -1174,9 +1075,7 @@ async function sendGateEmbed(sourceInteraction: any, description: string) {
     }
 }
 
-type UserMode = 'SAFE' | 'BALANCED' | 'AGGRESSIVE';
-
-async function loadUserMode(discordUserId: string): Promise<UserMode> {
+async function loadUserMode(discordUserId: string): Promise<UserRiskMode> {
     const { data, error } = await supabase
         .from('user_settings')
         .select('mode')
@@ -1197,7 +1096,7 @@ async function loadUserMode(discordUserId: string): Promise<UserMode> {
     return 'BALANCED';
 }
 
-async function saveUserMode(discordUserId: string, mode: UserMode): Promise<void> {
+async function saveUserMode(discordUserId: string, mode: UserRiskMode): Promise<void> {
     const payload = {
         discord_user_id: discordUserId,
         mode,
@@ -1443,27 +1342,6 @@ async function runOpenTopicDebate(userId: string, userQuery: string, sourceInter
     }
 }
 
-const financialCommandQueryMap: Record<string, string> = {
-    'panel:portfolio:risk': '포트폴리오 리스크 집중 분석',
-    'panel:finance:analyze_spending': '최근 소비 패턴 분석 및 미래지향성 평가',
-    'panel:finance:stability': '재무 안정성 점검',
-    'panel:ai:full': '종합 자산 및 소비 구조 진단',
-    'panel:ai:risk': '포트폴리오 리스크 점검',
-    'panel:ai:strategy': '실행 가능한 투자 전략 제안',
-    'panel:ai:spending': '소비 개선 전략 및 평가'
-};
-
-const trendCommandQueryMap: Record<string, string> = {
-    'panel:trend:kpop':
-        'K-pop 산업·시장·콘텐츠·팬덤·플랫폼 관점에서 현재 핵심 트렌드와 이슈를 상세히 분석해 줘. (개인 포트폴리오·비중 언급 금지)',
-    'panel:trend:drama':
-        'OTT·드라마·영상 콘텐츠 산업 관점에서 플랫폼 경쟁, 소비 트렌드, 주요 이슈를 분석해 줘. (개인 포트폴리오·비중 언급 금지)',
-    'panel:trend:sports':
-        '스포츠 비즈니스(리그, 미디어, 스폰서, 팬, 글로벌 시장) 관점에서 구조와 트렌드를 분석해 줘. (개인 포트폴리오·비중 언급 금지)',
-    'panel:trend:hot':
-        '지금 사회·미디어·산업에서 두드러지는 핫 트렌드와 배경, 소비자 반응, 지속 가능성을 분석해 줘. (개인 포트폴리오·비중 언급 금지)'
-};
-
 client.on('messageCreate', async (message: Message) => {
     if (message.author.bot) return;
 
@@ -1643,455 +1521,6 @@ client.on('messageCreate', async (message: Message) => {
     }
 });
 
-function buildFollowupQueryFromLabel(label: string): string {
-    const s = label.toLowerCase();
-    if (/포트폴리오|자산|비중|점검/.test(s)) {
-        return '내 포트폴리오 전체를 점검하고 핵심 리스크와 다음 조치를 제안해줘.';
-    }
-    if (/종목|전략|심화/.test(s)) {
-        return '보유 종목과 투자 전략을 심화 분석하고 실행 가능한 다음 단계를 제안해줘.';
-    }
-    if (/트렌드|시장|이슈/.test(s)) {
-        return '최근 시장·트렌드 이슈가 내 포트폴리오에 미칠 수 있는 영향을 요약해줘.';
-    }
-    return `${label}에 대해 구체적으로 분석하고 다음 행동을 제안해줘.`;
-}
-
-async function runFollowupContinuation(
-    interaction: any,
-    snap: FollowupSnapshotRow,
-    optionIndex: number,
-    label: string
-): Promise<void> {
-    const userId = interaction.user.id;
-    logger.info('FOLLOWUP', 'FOLLOWUP_SELECTED', {
-        user_id: userId,
-        snapshot_id: snap.id,
-        option_index: optionIndex,
-        label: label.slice(0, 200),
-        analysis_type: snap.analysis_type
-    });
-    updateHealth(s => {
-        s.ux.lastFollowupSelectedAt = new Date().toISOString();
-    });
-    logger.info('FOLLOWUP', 'FOLLOWUP_EXECUTION_STARTED', {
-        user_id: userId,
-        execution_type: 'followup',
-        selected_option: label.slice(0, 200)
-    });
-    await interaction.deferReply({ ephemeral: false });
-    await interaction.editReply({
-        content: `**선택:** ${label.slice(0, 200)}\n후속 분석을 실행합니다… _(자동 주문 없음)_`
-    });
-    const query = buildFollowupQueryFromLabel(label);
-    const low = label.toLowerCase();
-    const fin = detectFinancialIntent(query);
-    let execLabel = 'open_topic_followup';
-    try {
-        if (/트렌드|시장\s*이슈|핫\s*이슈/.test(low) && !fin) {
-            await runTrendAnalysis(userId, query, interaction, 'free', undefined);
-            execLabel = 'trend_followup';
-        } else if (fin) {
-            await runPortfolioDebate(userId, query, interaction);
-            execLabel = 'portfolio_followup';
-        } else {
-            await runOpenTopicDebate(userId, query, interaction);
-        }
-        logger.info('FOLLOWUP', 'FOLLOWUP_EXECUTION_COMPLETED', {
-            user_id: userId,
-            analysis_type: snap.analysis_type,
-            execution_type: execLabel,
-            selected_option: label.slice(0, 200)
-        });
-        await interaction.editReply({
-            content: '**후속 분석이 채널에 전송되었습니다.** _(자동 주문 없음)_'
-        });
-    } catch (e: any) {
-        logger.warn('FOLLOWUP', 'runFollowupContinuation failed', { message: e?.message || String(e) });
-        await interaction.editReply({
-            content: '후속 분석 중 문제가 있었습니다. 잠시 후 다시 시도해 주세요. _(자동 주문 없음)_'
-        });
-    }
-}
-
-async function handleFollowupSelectButton(interaction: any): Promise<void> {
-    const cid = interaction.customId as string;
-    const m = /^followup:select\|([0-9a-f-]{36})\|(\d+)$/i.exec(cid);
-    if (!m) {
-        await interaction.reply({ content: '잘못된 요청 형식입니다.', ephemeral: true }).catch(() => {});
-        return;
-    }
-    const snap = await getFollowupSnapshotById(m[1]);
-    const discordUserId = getDiscordUserId(interaction.user);
-    if (!snap || snap.discord_user_id !== discordUserId) {
-        await safeDeferReply(interaction, { flags: 64 });
-        await interaction.editReply({ content: '세션이 만료되었거나 권한이 없습니다.' });
-        return;
-    }
-    const idx = Number(m[2]);
-    const label = snap.options[idx] ?? '';
-    if (!label) {
-        await safeDeferReply(interaction, { flags: 64 });
-        await interaction.editReply({ content: '선택 항목을 찾을 수 없습니다.' });
-        return;
-    }
-    await runFollowupContinuation(interaction, snap, idx, label);
-}
-
-async function handleFollowupMenuInteraction(interaction: any): Promise<void> {
-    const sid = interaction.customId as string;
-    const m = /^followup:menu\|([0-9a-f-]{36})$/i.exec(sid);
-    if (!m) {
-        await interaction.reply({ content: '잘못된 요청 형식입니다.', ephemeral: true }).catch(() => {});
-        return;
-    }
-    const snap = await getFollowupSnapshotById(m[1]);
-    const discordUserId = getDiscordUserId(interaction.user);
-    if (!snap || snap.discord_user_id !== discordUserId) {
-        await interaction.reply({ content: '세션이 만료되었거나 권한이 없습니다.', ephemeral: true });
-        return;
-    }
-    const idx = parseInt(interaction.values?.[0] ?? '0', 10);
-    const label = snap.options[idx] ?? '';
-    if (!label) {
-        await interaction.reply({ content: '선택 항목을 찾을 수 없습니다.', ephemeral: true });
-        return;
-    }
-    await runFollowupContinuation(interaction, snap, idx, label);
-}
-
-async function handleFollowupInputButton(interaction: any): Promise<void> {
-    const cid = interaction.customId as string;
-    const m = /^followup:input\|([0-9a-f-]{36})$/i.exec(cid);
-    if (!m) {
-        await interaction.reply({ content: '잘못된 요청 형식입니다.', ephemeral: true }).catch(() => {});
-        return;
-    }
-    const snap = await getFollowupSnapshotById(m[1]);
-    const discordUserId = getDiscordUserId(interaction.user);
-    if (!snap || snap.discord_user_id !== discordUserId) {
-        await interaction.reply({ content: '세션이 만료되었거나 권한이 없습니다.', ephemeral: true });
-        return;
-    }
-    const modal = new ModalBuilder()
-        .setCustomId(`modal:followup:${m[1]}`)
-        .setTitle('답변 입력')
-        .addComponents(
-            new ActionRowBuilder<TextInputBuilder>().addComponents(
-                new TextInputBuilder()
-                    .setCustomId('followup_text')
-                    .setLabel('다음 분석에 반영할 내용')
-                    .setStyle(TextInputStyle.Paragraph)
-                    .setRequired(true)
-                    .setMaxLength(2000)
-            )
-        );
-    await interaction.showModal(modal);
-}
-
-async function handleFollowupModalSubmit(interaction: any): Promise<void> {
-    const cid = interaction.customId as string;
-    const m = /^modal:followup:([0-9a-f-]{36})$/i.exec(cid);
-    if (!m) {
-        await interaction.reply({ content: '잘못된 요청 형식입니다.', ephemeral: true }).catch(() => {});
-        return;
-    }
-    const snap = await getFollowupSnapshotById(m[1]);
-    const userId = getDiscordUserId(interaction.user);
-    if (!snap || snap.discord_user_id !== userId) {
-        await safeDeferReply(interaction, { flags: 64 });
-        await interaction.editReply({ content: '세션이 만료되었거나 권한이 없습니다.' });
-        return;
-    }
-    const text = (interaction.fields.getTextInputValue('followup_text') || '').trim();
-    if (!text) {
-        await safeDeferReply(interaction, { flags: 64 });
-        await interaction.editReply({ content: '내용을 입력해 주세요.' });
-        return;
-    }
-    logger.info('FOLLOWUP', 'FOLLOWUP_INPUT_SUBMITTED', { user_id: userId, snapshot_id: snap.id });
-    logger.info('FOLLOWUP', 'FOLLOWUP_EXECUTION_STARTED', { user_id: userId, execution_type: 'free_input' });
-    await interaction.deferReply({ ephemeral: false });
-    await interaction.editReply({ content: '입력을 반영해 분석을 시작합니다… _(자동 주문 없음)_' });
-    const query = `${text}\n\n위 내용을 반영해 구체적으로 분석하고 다음 행동을 제안해줘.`;
-    try {
-        if (detectFinancialIntent(query)) {
-            await runPortfolioDebate(userId, query, interaction);
-        } else {
-            await runOpenTopicDebate(userId, query, interaction);
-        }
-        logger.info('FOLLOWUP', 'FOLLOWUP_EXECUTION_COMPLETED', {
-            user_id: userId,
-            analysis_type: snap.analysis_type,
-            execution_type: 'free_input_followup'
-        });
-        await interaction.editReply({
-            content: '**후속 분석이 채널에 전송되었습니다.** _(자동 주문 없음)_'
-        });
-    } catch (e: any) {
-        logger.warn('FOLLOWUP', 'modal followup failed', { message: e?.message || String(e) });
-        await interaction.editReply({
-            content: '후속 분석 중 문제가 있었습니다. 잠시 후 다시 시도해 주세요.'
-        });
-    }
-}
-
-async function handleDecisionButtonInteraction(interaction: any): Promise<void> {
-    const cid = interaction.customId as string;
-    const discordUserId = getDiscordUserId(interaction.user);
-    const mUuid = /^decision:select\|([0-9a-f-]{36})\|(\d+)$/i.exec(cid);
-    const mLegacy = /^decision:select\|(\d+)\|(\d+)$/.exec(cid);
-
-    let chatHistoryId = 0;
-    let optIndex = 0;
-    let options: string[] = [];
-    let analysisType = '';
-    let personaKey: string | null = null;
-
-    if (mUuid) {
-        const snapshotId = mUuid[1];
-        optIndex = Number(mUuid[2]);
-        const snap = await getDecisionSnapshotById(snapshotId);
-        if (!snap || snap.discord_user_id !== discordUserId) {
-            logger.warn('DECISION', 'snapshot missing or user mismatch', { snapshotId });
-            await safeDeferReply(interaction, {});
-            await interaction.editReply({
-                content: '요청을 처리할 수 없습니다. 잠시 후 다시 시도해 주세요.'
-            });
-            return;
-        }
-        options = snap.options;
-        analysisType = snap.analysis_type ?? '';
-        personaKey = snap.persona_key;
-        const ref = snap.chat_history_ref;
-        chatHistoryId = ref ? parseInt(ref, 10) : 0;
-    } else if (mLegacy) {
-        chatHistoryId = Number(mLegacy[1]);
-        optIndex = Number(mLegacy[2]);
-        const msg = String(interaction.message?.content || '');
-        options = extractDecisionOptions(msg);
-        analysisType = '';
-        personaKey = null;
-    } else {
-        logger.warn('DECISION', 'invalid decision customId', { cid });
-        await safeDeferReply(interaction, {});
-        await interaction.editReply({
-            content: '요청을 처리할 수 없습니다. 잠시 후 다시 시도해 주세요.'
-        });
-        return;
-    }
-
-    const selectedOption = options[optIndex] ?? options[0] ?? '선택';
-    if (!Number.isFinite(chatHistoryId) || chatHistoryId <= 0 || !Number.isFinite(optIndex)) {
-        await safeDeferReply(interaction, {});
-        await interaction.editReply({
-            content: '요청을 처리할 수 없습니다. 잠시 후 다시 시도해 주세요.'
-        });
-        return;
-    }
-
-    await safeDeferReply(interaction, {});
-
-    logger.info('DECISION', 'DECISION_SELECTED', {
-        chatHistoryId,
-        userId: discordUserId,
-        selectedOption,
-        optionIndex: optIndex,
-        options: options.slice(0, 4)
-    });
-    updateHealth(s => {
-        s.ux.lastDecisionSelectedAt = new Date().toISOString();
-    });
-
-    const decisionContext: Record<string, unknown> = {
-        options,
-        persona: personaKey,
-        topic: decisionTopicHintForContext(analysisType || 'UNKNOWN')
-    };
-    if (mUuid) {
-        decisionContext.snapshot_id = mUuid[1];
-    }
-
-    await insertDecisionHistoryRow({
-        discordUserId,
-        chatHistoryRef: String(chatHistoryId),
-        analysisType: analysisType || null,
-        selectedOption,
-        optionIndex: optIndex,
-        decisionContext
-    });
-
-    const userMode = await loadUserMode(discordUserId);
-    let exec: { replyAck: string; followUpMarkdown: string; execution_type: string };
-    try {
-        exec = await executeDecisionAfterSelection({
-            discordUserId,
-            chatHistoryId,
-            analysisType: analysisType || 'UNKNOWN',
-            personaKey,
-            selectedOption,
-            optionIndex: optIndex,
-            options,
-            decisionContext,
-            userMode
-        });
-    } catch (e: any) {
-        logger.warn('DECISION', 'executeDecisionAfterSelection threw', { message: e?.message || String(e) });
-        exec = {
-            replyAck: `**선택 완료:** ${selectedOption}을(를) 반영합니다.`,
-            followUpMarkdown:
-                '후속 안내를 불러오는 중 문제가 있었습니다. 잠시 후 다시 시도해 주세요. _(자동 매매 없음)_',
-            execution_type: 'error'
-        };
-    }
-
-    await interaction.editReply({ content: exec.replyAck.slice(0, 1900) });
-
-    const ch = interaction.channel as { send?: (p: { content: string }) => Promise<unknown> } | undefined;
-    if (ch?.send && exec.followUpMarkdown) {
-        const chunks = splitDiscordMessage(exec.followUpMarkdown, 1800);
-        for (const part of chunks) {
-            try {
-                await ch.send({ content: part });
-            } catch (e: any) {
-                logger.warn('DECISION', 'decision followUp channel send failed', { message: e?.message || String(e) });
-            }
-        }
-    }
-}
-
-async function handleFeedbackSaveButtonInteraction(interaction: any): Promise<void> {
-    const cid = interaction.customId as string;
-    const discordUserId = getDiscordUserId(interaction.user);
-    await safeDeferReply(interaction, { flags: 64 });
-
-    const prefix = 'feedback:save:';
-    const rest = cid.slice(prefix.length);
-    const m = /^(\d+):([^:]+):(TRUSTED|ADOPTED|BOOKMARKED|DISLIKED|REJECTED):([A-Z0-9_]+)$/.exec(rest);
-    if (!m) {
-        logger.warn('FEEDBACK', 'invalid feedback customId', { cid });
-        await safeEditReply(interaction, '요청을 처리할 수 없습니다. 잠시 후 다시 시도해 주세요.', 'feedback:failure');
-        return;
-    }
-
-    const chatHistoryId = Number(m[1]);
-    const analysisType = m[2];
-    const feedbackType = m[3] as FeedbackType;
-    const personaKey = m[4];
-
-    if (!Number.isFinite(chatHistoryId) || chatHistoryId <= 0) {
-        await safeEditReply(interaction, '요청을 처리할 수 없습니다. 잠시 후 다시 시도해 주세요.', 'feedback:failure');
-        return;
-    }
-
-    logger.info('FEEDBACK', 'feedback button clicked', {
-        chatHistoryId,
-        analysisType,
-        feedbackType,
-        personaKey,
-        discordUserId
-    });
-
-    const personaName = personaKeyToDisplayNameForFeedback(personaKey);
-    /** analysisType은 customId 파싱값만 사용(chat_history.debate_type 조회 없음). */
-
-    try {
-        const chatRow = await findChatHistoryById(chatHistoryId);
-        if (!chatRow) {
-            await safeEditReply(interaction, '연결된 분석 기록을 찾을 수 없습니다.', 'feedback:not_found');
-            return;
-        }
-        if (String((chatRow as any).user_id) !== String(discordUserId)) {
-            await safeEditReply(interaction, '본인 분석에 대한 피드백만 저장할 수 있습니다.', 'feedback:forbidden');
-            return;
-        }
-
-        const saveResult = await saveAnalysisFeedbackHistory({
-            discordUserId,
-            chatHistoryId,
-            analysisType,
-            personaName,
-            opinionSummary: `button:${feedbackType}`,
-            opinionText: `button:${feedbackType}`,
-            feedbackType,
-            feedbackNote: null,
-            topicTags: []
-        });
-
-        if (saveResult.duplicate) {
-            logger.warn('FEEDBACK', 'duplicate ignored', {
-                scope: 'analysis_feedback_history',
-                chatHistoryId,
-                analysisType,
-                feedbackType,
-                personaKey,
-                discordUserId
-            });
-            await safeEditReply(interaction, '이미 같은 피드백이 저장되어 있습니다.', 'feedback:duplicate');
-            return;
-        }
-
-        logger.info('FEEDBACK', 'feedback history saved', {
-            chatHistoryId,
-            analysisType,
-            feedbackType,
-            personaName,
-            discordUserId
-        });
-
-        const ingestResult = await ingestPersonaFeedback({
-            discordUserId,
-            chatHistoryId,
-            analysisType,
-            personaName,
-            feedbackType,
-            opinionText: `button:${feedbackType}`,
-            feedbackNote: null
-        });
-
-        logger.info('FEEDBACK', 'feedback ingestion result', {
-            chatHistoryId,
-            analysisType,
-            feedbackType,
-            personaName,
-            duplicate: ingestResult.duplicate,
-            mappedCount: ingestResult.mappedCount,
-            bestClaimId: ingestResult.bestClaimId,
-            mappingMethod: ingestResult.mappingMethod,
-            discordUserId
-        });
-
-        if (ingestResult.duplicate) {
-            logger.warn('FEEDBACK', 'duplicate ignored', {
-                scope: 'claim_feedback',
-                chatHistoryId,
-                analysisType,
-                feedbackType,
-                personaKey,
-                discordUserId
-            });
-            await safeEditReply(interaction, '이미 반영된 피드백입니다.', 'feedback:claim_duplicate');
-            return;
-        }
-
-        await safeEditReply(interaction, `피드백 저장 완료: ${feedbackType}`, 'feedback:success');
-    } catch (e: any) {
-        logger.error('FEEDBACK', 'handler failed', {
-            message: e?.message || String(e),
-            chatHistoryId,
-            analysisType,
-            feedbackType,
-            personaKey,
-            discordUserId
-        });
-        await safeEditReply(
-            interaction,
-            '일시적인 저장 오류입니다. 잠시 후 다시 시도해 주세요.',
-            'feedback:failure'
-        );
-    }
-}
-
 const portfolioInteractionDeps = {
     getDiscordUserId,
     pendingBuyAccountId,
@@ -2122,9 +1551,50 @@ const portfolioModalDeps = {
     learnBehaviorFromTrades
 };
 
+const { buttonRoutes, stringSelectRoutes, modalRoutes } = buildInteractionRoutes();
+
+const discordInteractionContext: DiscordInteractionContext = {
+    logger,
+    supabase,
+    client,
+    webhook,
+    updateHealth,
+    getDiscordUserId,
+    interactions: {
+        safeDeferReply,
+        safeEditReply,
+        safeReplyOrFollowUp,
+        safeUpdate,
+        safeEditReplyPayload,
+        safeDeferUpdate,
+        ensureInteractionDeferred,
+        safeSendChunkedInteractionContent
+    },
+    panel: createPanelAdapter(),
+    runtime: {
+        runTrendAnalysis,
+        runPortfolioDebate,
+        runOpenTopicDebate,
+        runDataCenterAction
+    },
+    portfolio: {
+        interactionDeps: portfolioInteractionDeps,
+        modalDeps: portfolioModalDeps
+    },
+    settings: {
+        loadUserMode,
+        saveUserMode
+    }
+};
+
 logger.info('BOOT', 'interactionCreate handler registered', {
     pid: process.pid,
-    source: 'index.ts'
+    source: 'index.ts',
+    interactionRoutes: {
+        button: buttonRoutes.length,
+        stringSelect: stringSelectRoutes.length,
+        modal: modalRoutes.length
+    }
 });
 
 client.on('interactionCreate', async (interaction: Interaction) => {
@@ -2153,257 +1623,10 @@ client.on('interactionCreate', async (interaction: Interaction) => {
                 s.interactions.lastInteractionType = 'button';
                 s.interactions.lastCustomId = cid;
             });
-
-            if (cid.startsWith('decision:select|')) {
-                await handleDecisionButtonInteraction(interaction);
-                return;
-            }
-
-            if (cid.startsWith('followup:select|')) {
-                await handleFollowupSelectButton(interaction);
-                return;
-            }
-            if (cid.startsWith('followup:input|')) {
-                await handleFollowupInputButton(interaction);
-                return;
-            }
-
-            if (cid.startsWith('feedback:save:')) {
-                await handleFeedbackSaveButtonInteraction(interaction);
-                return;
-            }
-
-            if (cid.startsWith('instr:confirm:')) {
-                await handleInstrumentConfirm(interaction, portfolioModalDeps);
-                return;
-            }
-            if (cid.startsWith('instr:cancel:')) {
-                await handleInstrumentCancel(interaction, portfolioModalDeps);
-                return;
-            }
-
-            const routedEarly = await routeEarlyButtonInteraction({
-                interaction,
-                customId: cid,
-                getDiscordUserId,
-                safeDeferReply,
-                safeEditReply,
-                mainPanel: {
-                    getTrendPanel,
-                    getPortfolioPanel,
-                    getFinancePanel,
-                    getAIPanel,
-                    getDataCenterPanel,
-                    getSettingsPanel,
-                    getMainPanel,
-                    safeUpdate
-                }
+            const handled = await dispatchRoutesInOrder(buttonRoutes, interaction, discordInteractionContext, {
+                onMatch: (name) => logger.info('INTERACTION', 'route matched', { route: name })
             });
-            if (routedEarly) {
-                return;
-            }
-
-            if (cid === 'panel:settings:reinstall') {
-                const msg = await (interaction.channel as any)?.send(getMainPanel());
-                if (msg) savePanelState(msg.channel.id, msg.id);
-                logger.info('PANEL', 'Explicit reinstall via button', { channelId: msg?.channel.id, messageId: msg?.id });
-                updateHealth(s => s.panels.lastPanelAction = 'button_reinstall');
-                await interaction.message?.delete().catch(()=>{});
-                return;
-            }
-
-            const trendTopicBtn = trendTopicFromCustomId(cid);
-            if (trendTopicBtn != null && trendCommandQueryMap[cid]) {
-                const query = trendCommandQueryMap[cid];
-                const statusText = '📌 **트렌드·주제 분석 중…** (포트폴리오 스냅샷 미사용)';
-                await safeDeferReply(interaction, { flags: 64 });
-                await safeEditReplyPayload(interaction, { content: statusText }, `${cid}:status`);
-                await runTrendAnalysis(interaction.user.id, query, interaction, trendTopicBtn, cid);
-                return;
-            }
-
-            if (cid === 'panel:data:daily_logs' || cid === 'panel:data:improvement') {
-                const action = cid === 'panel:data:daily_logs' ? 'daily_log_analysis' : 'system_improvement_suggestion';
-                await safeDeferReply(interaction, { flags: 64 });
-                await safeEditReply(interaction, '🗄 **데이터 센터 분석 실행 중...**', `${cid}:status`);
-                await runDataCenterAction(interaction.user.id, action, interaction);
-                return;
-            }
-
-            const rebMatch = /^rebalance:(view|complete|hold):([0-9a-f-]{36})$/i.exec(cid);
-            if (rebMatch) {
-                const act = rebMatch[1].toLowerCase();
-                const planId = rebMatch[2];
-                const uid = interaction.user.id;
-                await safeDeferReply(interaction, { flags: 64 });
-                if (act === 'view') {
-                    const { plan, items, error } = await getRebalancePlanById(planId);
-                    if (error || !plan || plan.discord_user_id !== uid) {
-                        await safeEditReply(interaction, '플랜을 찾을 수 없거나 권한이 없습니다.', 'rebalance:view');
-                        return;
-                    }
-                    const txt = renderPlanItemsText(items, plan.plan_header, plan.fx_usdkrw);
-                    await safeEditReply(interaction, txt.slice(0, 1990), 'rebalance:view');
-                    return;
-                }
-                if (act === 'complete') {
-                    const r = await executeRebalancePlanComplete({ discordUserId: uid, planId });
-                    await safeEditReply(interaction, r.message, 'rebalance:complete');
-                    return;
-                }
-                if (act === 'hold') {
-                    const r = await dismissRebalancePlanHold({ discordUserId: uid, planId });
-                    await safeEditReply(interaction, r.message, 'rebalance:hold');
-                    return;
-                }
-            }
-
-            if (cid === 'panel:data:persona_report') {
-                await safeDeferReply(interaction, { flags: 64 });
-                const uid = interaction.user.id;
-                const c7 = await buildPersonaScorecards({ discordUserId: uid, windowDays: 7 });
-                const c30 = await buildPersonaScorecards({ discordUserId: uid, windowDays: 30 });
-                const t =
-                    formatPersonaScorecardDiscord(c7, '최근 7일') +
-                    '\n\n' +
-                    formatPersonaScorecardDiscord(c30, '최근 30일');
-                const chunks = splitDiscordMessage(t, 1800);
-                await safeEditReply(interaction, chunks[0] || t, 'panel:data:persona_report');
-                return;
-            }
-
-            if (cid === 'panel:data:claim_audit') {
-                await safeDeferReply(interaction, { flags: 64 });
-                const r = await runClaimOutcomeAuditAppService({ discordUserId: interaction.user.id, limit: 60 });
-                const msg =
-                    `claim 감사 배치 완료 · 갱신 ${r.updated} · 스킵 ${r.skipped}` +
-                    (r.errors.length ? ` · 오류 ${r.errors.slice(0, 2).join('; ')}` : '');
-                await safeEditReply(interaction, msg, 'panel:data:claim_audit');
-                return;
-            }
-
-            if (cid === 'panel:data:rebalance_view') {
-                await safeDeferReply(interaction, { flags: 64 });
-                const uid = interaction.user.id;
-                const { plan, items, error } = await getLatestPendingRebalancePlan(uid);
-                if (error) {
-                    await safeEditReply(interaction, `조회 실패: ${error}`, 'panel:data:rebalance_view:err');
-                    return;
-                }
-                if (!plan) {
-                    await safeEditReply(interaction, '대기 중인 리밸런싱 계획이 없습니다.', 'panel:data:rebalance_view:empty');
-                    return;
-                }
-                const txt = renderPlanItemsText(items, plan.plan_header, plan.fx_usdkrw);
-                await safeEditReply(interaction, txt.slice(0, 1990), 'panel:data:rebalance_view');
-                return;
-            }
-
-            if (cid === 'panel:system:check' || cid === 'panel:system:detail' || cid === 'panel:system:actions') {
-                await safeDeferReply(interaction, { flags: 64 });
-                const r = analyzeLogs();
-                const raw =
-                    cid === 'panel:system:check'
-                        ? generateSystemReport(r)
-                        : cid === 'panel:system:detail'
-                          ? generateDetailView(r)
-                          : generateActionsView(r);
-                logger.info('DATA_CENTER', 'system_log_analysis', {
-                    customId: cid,
-                    status: r.systemStatus,
-                    issueCount: r.issues.length,
-                    warnCount: r.warnings.length
-                });
-                const chunks = splitDiscordMessage(raw, 1800);
-                await safeEditReply(interaction, chunks[0] || '_내용 없음_', `panel:system:${cid}`);
-                for (let i = 1; i < chunks.length; i++) {
-                    await interaction.followUp({ content: chunks[i], ephemeral: true }).catch(() => {});
-                }
-                return;
-            }
-
-            if (financialCommandQueryMap[cid]) {
-                const query = financialCommandQueryMap[cid];
-                const statusText = '📊 **포트폴리오·소비·현금흐름 기준 재무 분석 중...**';
-                await safeDeferReply(interaction, { flags: 64 });
-                await safeEditReplyPayload(interaction, { content: statusText }, `${cid}:status`);
-                await runPortfolioDebate(interaction.user.id, query, interaction);
-                return;
-            }
-
-            if (await tryHandlePortfolioButton(interaction, portfolioInteractionDeps)) {
-                return;
-            }
-
-            if (cid === 'panel:finance:add_expense') {
-                const modal = new ModalBuilder().setCustomId('modal:expense:add').setTitle('💸 지출 기록');
-                modal.addComponents(
-                    new ActionRowBuilder<TextInputBuilder>().addComponents(new TextInputBuilder().setCustomId('amount').setLabel("금액").setStyle(TextInputStyle.Short)),
-                    new ActionRowBuilder<TextInputBuilder>().addComponents(new TextInputBuilder().setCustomId('category').setLabel("카테고리").setStyle(TextInputStyle.Short)),
-                    new ActionRowBuilder<TextInputBuilder>().addComponents(new TextInputBuilder().setCustomId('desc').setLabel("상세 설명").setStyle(TextInputStyle.Paragraph).setRequired(false)),
-                    new ActionRowBuilder<TextInputBuilder>().addComponents(
-                        new TextInputBuilder()
-                            .setCustomId('installment')
-                            .setLabel('할부 (N 또는 Y 개월 시작일, 예: Y 3 2026-01-01)')
-                            .setStyle(TextInputStyle.Short)
-                            .setRequired(false)
-                    )
-                );
-                await interaction.showModal(modal);
-                return;
-            }
-
-            if (cid === 'panel:finance:add_cashflow') {
-                logger.info('INTERACTION', 'button click: panel:finance:add_cashflow', { user: interaction.user.tag });
-                const modal = new ModalBuilder().setCustomId('modal:cashflow:add').setTitle('💰 현금흐름 입력');
-                modal.addComponents(
-                    new ActionRowBuilder<TextInputBuilder>().addComponents(
-                        new TextInputBuilder()
-                            .setCustomId('flow_type')
-                            .setLabel('유형 (SALARY, BONUS, LOAN_IN, LOAN_PRINCIPAL, …)')
-                            .setStyle(TextInputStyle.Short)
-                    ),
-                    new ActionRowBuilder<TextInputBuilder>().addComponents(new TextInputBuilder().setCustomId('amount').setLabel("금액").setStyle(TextInputStyle.Short)),
-                    new ActionRowBuilder<TextInputBuilder>().addComponents(new TextInputBuilder().setCustomId('desc').setLabel("상세 설명").setStyle(TextInputStyle.Paragraph).setRequired(false))
-                );
-                logger.info('INTERACTION', 'modal open: modal:cashflow:add', { user: interaction.user.tag });
-                await interaction.showModal(modal);
-                return;
-            }
-
-            if (cid === 'panel:ai:ask' || cid === 'panel:trend:free') {
-                const modal = new ModalBuilder().setCustomId(cid === 'panel:ai:ask' ? 'modal:ai:ask' : 'modal:trend:free').setTitle(cid === 'panel:ai:ask' ? '✍️ 직접 질문' : '🔍 자유 탐색');
-                modal.addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(
-                    new TextInputBuilder().setCustomId('query').setLabel("궁금한 내용을 입력하세요").setStyle(TextInputStyle.Paragraph)
-                ));
-                await interaction.showModal(modal);
-                return;
-            }
-
-            if (cid === 'panel:settings:view') {
-                const discordUserId = getDiscordUserId(interaction.user);
-                const mode = await loadUserMode(discordUserId);
-                await safeReplyOrFollowUp(interaction, { content: `현재 설정 모드: **${mode}**`, ephemeral: true }, 'panel:settings:view');
-                return;
-            }
-
-            if (cid.startsWith('panel:settings:')) {
-                const modeMap: Record<string, UserMode> = {
-                    'panel:settings:safe': 'SAFE',
-                    'panel:settings:balanced': 'BALANCED',
-                    'panel:settings:aggressive': 'AGGRESSIVE'
-                };
-                const targetMode = modeMap[cid];
-                if (!targetMode) return;
-                const discordUserId = getDiscordUserId(interaction.user);
-                try {
-                    await saveUserMode(discordUserId, targetMode);
-                    await safeReplyOrFollowUp(interaction, { content: `✅ 성향 설정 저장 완료: **${targetMode}**`, ephemeral: true }, 'panel:settings:update');
-                } catch (e: any) {
-                    await safeReplyOrFollowUp(interaction, { content: `❌ 설정 저장 실패: ${e?.message || 'unknown'}`, ephemeral: true }, 'panel:settings:update:failure');
-                }
-                return;
-            }
+            if (handled) return;
         }
 
         if (interaction.isStringSelectMenu()) {
@@ -2413,19 +1636,10 @@ client.on('interactionCreate', async (interaction: Interaction) => {
                 s.interactions.lastInteractionType = 'string_select';
                 s.interactions.lastCustomId = sid;
             });
-
-            if (sid.startsWith('instr:pick:')) {
-                if (await handleInstrumentPick(interaction, portfolioModalDeps)) return;
-            }
-
-            if (sid.startsWith('followup:menu|')) {
-                await handleFollowupMenuInteraction(interaction);
-                return;
-            }
-
-            if (await tryHandlePortfolioStringSelect(interaction, portfolioInteractionDeps)) {
-                return;
-            }
+            const handled = await dispatchRoutesInOrder(stringSelectRoutes, interaction, discordInteractionContext, {
+                onMatch: (name) => logger.info('INTERACTION', 'route matched', { route: name })
+            });
+            if (handled) return;
         }
 
         if (interaction.type === InteractionType.ModalSubmit) {
@@ -2443,123 +1657,10 @@ client.on('interactionCreate', async (interaction: Interaction) => {
                 s.interactions.lastInteractionType = 'modal';
                 s.interactions.lastCustomId = cid;
             });
-
-            if (cid.startsWith('modal:followup:')) {
-                await handleFollowupModalSubmit(interaction);
-                return;
-            }
-
-            if (cid === 'modal:trend:free') {
-                const query = interaction.fields.getTextInputValue('query');
-                const statusText = '📌 **트렌드·주제 분석 중…** (포트폴리오 스냅샷 미사용)';
-                await safeDeferReply(interaction, { flags: 64 });
-                await safeEditReplyPayload(interaction, { content: statusText }, `${cid}:status`);
-                await runTrendAnalysis(interaction.user.id, query, interaction, 'free', cid);
-                return;
-            }
-
-            if (cid === 'modal:ai:ask') {
-                const orch = decideOrchestratorRoute({ modalId: cid });
-                logOrchestratorDecision(orch, { source: 'modal:ai:ask' });
-                const query = interaction.fields.getTextInputValue('query');
-                const isFinancial = detectFinancialIntent(query);
-                const statusText = isFinancial
-                    ? '📊 **포트폴리오 기반 재무 분석 중...**'
-                    : '📌 **자유 주제 분석 중…** (포트폴리오 스냅샷 미사용)';
-                await safeDeferReply(interaction, { flags: 64 });
-                await safeEditReplyPayload(interaction, { content: statusText }, `${cid}:status`);
-                if (isFinancial) {
-                    await runPortfolioDebate(interaction.user.id, query, interaction);
-                } else {
-                    await runOpenTopicDebate(interaction.user.id, query, interaction);
-                }
-                return;
-            }
-
-            if (await tryHandlePortfolioModalSubmit(interaction, portfolioModalDeps)) {
-                return;
-            }
-
-            if (cid === 'modal:expense:add') {
-                await safeDeferReply(interaction, { flags: 64 });
-                const amount = parsePositiveAmount(interaction.fields.getTextInputValue('amount'));
-                const category = interaction.fields.getTextInputValue('category');
-                const desc = sanitizeDescription(interaction.fields.getTextInputValue('desc'));
-                const installmentRaw = (interaction.fields.getTextInputValue('installment') || '').trim();
-                if (!amount) {
-                    await safeEditReply(interaction, "입력값을 확인해주세요. 금액이 올바르지 않습니다.", 'modal:expense:add:validation_failure');
-                    return;
-                }
-
-                const inst = parseInstallmentLine(installmentRaw, amount);
-                const expensePayload: Record<string, unknown> = {
-                    discord_user_id: getDiscordUserId(interaction.user),
-                    amount,
-                    category,
-                    description: desc,
-                    is_installment: inst.is_installment,
-                    installment_months: inst.installment_months,
-                    monthly_recognized_amount: inst.monthly_recognized_amount,
-                    installment_start_date: inst.installment_start_date
-                };
-
-                const { error } = await supabase.from('expenses').insert(expensePayload);
-                if (error) { 
-                    logger.error('DATABASE', 'Supabase insert failure', error); 
-                    await safeEditReply(interaction, "지출 저장 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.", 'modal:expense:add:db_failure');
-                    return; 
-                }
-                await safeEditReply(interaction, `✅ **${category}** 지출 기록 완료!`, 'modal:expense:add:success');
-                return;
-            }
-
-            if (cid === 'modal:cashflow:add') {
-                logger.info('INTERACTION', 'modal submit received: modal:cashflow:add', { user: interaction.user.tag });
-                await safeDeferReply(interaction, { flags: 64 });
-                try {
-                    const flowTypeRaw = interaction.fields.getTextInputValue('flow_type');
-                    const flowType = parseCashflowFlowType(flowTypeRaw);
-                    const amount = parsePositiveAmount(interaction.fields.getTextInputValue('amount'));
-                    const description = sanitizeDescription(interaction.fields.getTextInputValue('desc'));
-
-                    if (!flowType || !amount) {
-                        logger.warn('INTERACTION', 'validation failure: modal:cashflow:add', {
-                            flowTypeRaw,
-                            amountRaw: interaction.fields.getTextInputValue('amount')
-                        });
-                        await safeEditReply(
-                            interaction,
-                            '입력값을 확인해주세요. 금액과 유형이 올바르지 않습니다. 유형: SALARY, BONUS, LOAN_IN, LOAN_PRINCIPAL, LOAN_INTEREST, CONSUMPTION, OTHER_IN, OTHER_OUT (레거시 영문 별칭도 허용)',
-                            'modal:cashflow:add:validation_failure'
-                        );
-                        return;
-                    }
-
-                    logger.info('INTERACTION', 'validation success: modal:cashflow:add', { flowType, amount });
-                    const payload = {
-                        discord_user_id: getDiscordUserId(interaction.user),
-                        flow_type: flowType,
-                        amount,
-                        description,
-                        flow_date: new Date().toISOString()
-                    };
-
-                    logger.info('DB', '[cashflow][insert] attempt', { table: 'cashflow', payloadKeys: Object.keys(payload) });
-                    const { error } = await supabase.from('cashflow').insert(payload);
-                    if (error) {
-                        logSchemaSafeInsertFailure('cashflow', payload, error);
-                        await safeEditReply(interaction, "현금흐름 저장 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.", 'modal:cashflow:add:db_failure');
-                        return;
-                    }
-
-                    logger.info('DB', '[cashflow][insert] success', { userId: interaction.user.id, flowType, amount });
-                    await safeEditReply(interaction, "현금흐름이 정상적으로 저장되었습니다.", 'modal:cashflow:add:success');
-                } catch (modalError: any) {
-                    logger.error('INTERACTION', 'modal:cashflow:add exception', modalError);
-                    await safeEditReply(interaction, "현금흐름 저장 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.", 'modal:cashflow:add:exception');
-                }
-                return;
-            }
+            const handled = await dispatchRoutesInOrder(modalRoutes, interaction, discordInteractionContext, {
+                onMatch: (name) => logger.info('INTERACTION', 'route matched', { route: name })
+            });
+            if (handled) return;
         }
     } catch (error) {
         const anyInteraction: any = interaction as any;

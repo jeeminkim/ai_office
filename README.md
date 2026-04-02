@@ -14,6 +14,13 @@ npm run build
 npm start
 ```
 
+## Discord interaction (entrypoint)
+
+- **`index.ts`**는 환경·클라이언트·Supabase·`safeDeferReply` / `safeEditReply` 등을 초기화한 뒤, `interactionCreate`는 **`buildInteractionRoutes()`** + **`dispatchRoutesInOrder`** 로 버튼·셀렉트·모달을 처리한다. (`src/discord/handlers/interactionCreate/`, `src/discord/interactionRegistry.ts`, `src/discord/InteractionContext.ts`)
+- **`createPanelAdapter()`** (`src/discord/adapters/panelAdapter.ts`)는 `panelManager`를 감싼 얇은 레이어로, 핸들러가 패널 빌더 구현에 직접 묶이지 않게 한다.
+- **루트 `quoteService` / `portfolioService` 등**은 이번 단계에서 `domain/`으로 옮기지 않았다. 오케스트레이션은 index의 `runtime` 번들로 컨텍스트에 주입한다.
+- **운영 스모크(로컬)**: `npm run smoke:interaction` — 라우트 개수·이름만 출력(Supabase dummy env 선로드). `npm run smoke:followup-routes`, `npm run smoke:panel-restore`.
+
 ## Logging (일별 + 운영 요약)
 
 - **일별 파일** (`logs/daily/`): `office-runtime_YYYYMMDD.log`(상세·INFO, INTERACTION 등 고빈도는 기본적으로 여기서 제외되고 카테고리 로그에만 기록), `office-error_YYYYMMDD.log`, `office-ops_YYYYMMDD.log`(부팅·연결·패널·스키마·피드백 실패·리밸·ERROR 등 핵심), 필요 시 `office-debug_YYYYMMDD.log`(`LOG_DEBUG=1`).

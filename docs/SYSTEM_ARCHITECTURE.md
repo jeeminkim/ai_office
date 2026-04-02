@@ -17,11 +17,17 @@
 - LLM은 Gemini/OpenAI 혼합 구조이며 `llmProviderService.ts`에서 provider 선택 및 fallback을 중앙 제어한다.
 
 ## 계층 구조 (Phase 1 리팩토링)
-1. **Interaction** (`src/interactions/`)
-   - `interactionRouter.ts`: 메인 패널(`panel:main:*`) 등 선처리(`decision:select|*`·`feedback:save:*`는 **`index.ts`에서 직접 처리** — `handleDecisionButtonInteraction` / `saveAnalysisFeedbackHistory` / `ingestPersonaFeedback`)
-   - `instrumentConfirmationHandler.ts`: 종목 추가 모달 → 후보 저장(`instrument_registration_candidates`) → `instr:pick` / `instr:confirm` / `instr:cancel`. **사용자 확인 전**에는 `portfolio`/`trade_history`에 쓰지 않음; 확정 시 `validateConfirmedInstrument`(`src/services/instrumentValidation.ts`) 후 `recordBuyTrade`.
-   - `feedbackInteractionHandler.ts`: 레거시 보관(현재 피드백 버튼은 `index.ts` 핸들러 사용)
-   - `panelInteractionHandler.ts`: 메인 패널 네비게이션(트렌드 서브패널 포함)
+1. **Interaction** (`src/interactions/` + `src/discord/handlers/interactionCreate/`)
+   - **`index.ts` 역할**: env·`Client`/`Supabase`/`Webhook`·`safeDeferReply` 등 공통 유틸 부트스트랩 후, `interactionCreate`는 **`dispatchRoutesInOrder`**로 위임한다. 거대한 `if` 체인은 **`buildInteractionRoutes()`**에 등록된 `InteractionRoute[]`(버튼 / string select / modal 각각)으로 옮겼다. 동작은 기존과 동일하며 **자동 매매(advisory만)** 유지.
+   - **`DiscordInteractionContext`** (`src/discord/InteractionContext.ts`): logger·supabase·`interactions.*`(defer/edit)·`panel`( `createPanelAdapter()` → `panelManager` 얇은 래핑)·`runtime`( `runTrendAnalysis` / `runPortfolioDebate` 등 index에 남은 오케스트레이션)·`portfolio` deps·`settings`(load/save user mode).
+   - **`interactionRegistry.ts`**: `InteractionRoute` = `{ name, match, handle }` — 등록 **순서가 우선순위**. `match` 후 `handle`이 `true`면 종료; `false`면 다음 route(포트폴리오 `tryHandle` 패턴).
+   - `interactionRouter.ts`: 메인 패널(`panel:main:*`) — registry의 `panel:main:early`에서 `routeEarlyButtonInteraction` 호출(`isMainPanelInteraction`으로만 매칭).
+   - **decision / feedback / follow-up**: `decisionHandler.ts`, `feedbackHandler.ts`, `followupHandlers.ts` — 로직은 index에서 **이동만**(동작 변경 최소).
+   - `instrumentConfirmationHandler.ts`: 종목 추가 모달 → 후보 저장 → `instr:*` (registry에서 호출).
+   - `feedbackInteractionHandler.ts`: 레거시 보관.
+   - `panelInteractionHandler.ts`: 메인 패널 네비게이션(트렌드 서브패널 포함).
+   - **UI 정책 상수**: `src/discord/uiPolicy.ts` — decision > follow-up > feedback > navigation 우선순위 문서화(코드 주석).
+   - **domain/ 미도입**: 루트 `*Service.ts`는 그대로 두고, 이번 단계에서는 **entrypoint 분산 + panelAdapter**만 적용(`README`/본 문서 참고).
 2. **Application** (`src/application/`)
    - `runPortfolioDebateAppService.ts` / `runTrendAnalysisAppService.ts` / `runOpenTopicDebateAppService.ts`: 금융·트렌드·오픈토픽 분석 오케스트레이션(LLM, `runAnalysisPipeline` 호출); 포트폴리오 토론은 `runDecisionEngineAppService`(Phase 2) 후행
    - `runFeedbackAppService.ts`: 피드백·claim 매핑·이력 저장 조율

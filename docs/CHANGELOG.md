@@ -35,6 +35,17 @@
 - ...
 ```
 
+## 2026-04-02
+
+### Refactor
+- **Discord entrypoint**: `interactionCreate`를 `src/discord/handlers/interactionCreate/buildInteractionRoutes.ts`의 `InteractionRoute[]` + `dispatchRoutesInOrder`로 위임. `DiscordInteractionContext`, `createPanelAdapter()`(panelManager 래핑), decision/feedback/follow-up 핸들러 분리. `src/discord/formParsing.ts`, `schemaInsertErrors.ts`로 모달 파싱·DB insert 로그 헬퍼 공용화. 동작 변경 최소·advisory 유지.
+
+### Added
+- **스모크**: `npm run smoke:interaction` | `smoke:followup-routes` | `smoke:panel-restore`(dummy Supabase 선로드가 필요한 스크립트는 `setDummySupabaseEnv.cjs` 사용).
+
+### Docs
+- `README.md`, `docs/SYSTEM_ARCHITECTURE.md`, `docs/OPERATIONS_RUNBOOK.md`, `docs/TEST_CHECKLIST.md` — registry·context·스모크 반영.
+
 ## 2026-04-01
 
 ### Added
