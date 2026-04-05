@@ -1,7 +1,8 @@
 import * as dotenv from 'dotenv';
 import { logger } from './logger';
 import { generateGeminiResponse } from './geminiLlmService';
-import { generateWithPersonaProvider } from './llmProviderService';
+import { generateWithPersonaProvider, getModelForTask } from './llmProviderService';
+import type { AiExecutionHandle } from './src/discord/aiExecution/aiExecutionHandle';
 import type { ProviderGenerationResult } from './analysisTypes';
 
 dotenv.config();
@@ -95,9 +96,24 @@ function asGeminiResult(text: string): ProviderGenerationResult {
   return { text, provider: 'gemini', model: 'gemini-2.5-flash' };
 }
 
-export async function generateTrendSpecialistResponseWithProvider(topic: TrendTopicKind, userQuery: string, discordUserId?: string): Promise<string> {
+export type TrendGenerateOptions = {
+  aiExecution?: AiExecutionHandle | null;
+  /** timeout 재시도 등: 짧은 출력 유도 */
+  fastShort?: boolean;
+};
+
+export async function generateTrendSpecialistResponseWithProvider(
+  topic: TrendTopicKind,
+  userQuery: string,
+  discordUserId?: string,
+  options?: TrendGenerateOptions
+): Promise<string> {
   const cfg = TREND_TOPIC_CONFIG[topic];
-  const contents = `${cfg.systemPrompt}\n\n[질문/요청]\n${userQuery}`;
+  const shortHint = options?.fastShort
+    ? '\n\n[FAST_SHORT] 응답은 600자 이내 한국어로 핵심만.\n[COMPRESSION_MODE: aggressive_compressed]\n'
+    : '';
+  const contents = `${cfg.systemPrompt}\n\n[질문/요청]\n${userQuery}${shortHint}`;
+  const ex = options?.aiExecution;
 
   try {
     if (topic === 'hot' && discordUserId) {
@@ -106,10 +122,20 @@ export async function generateTrendSpecialistResponseWithProvider(topic: TrendTo
         personaKey: 'HOT_TREND',
         personaName: cfg.agentLabel,
         prompt: contents,
+        aiExecution: ex ?? undefined,
+        taskType: 'PERSONA_ANALYSIS',
+        generation: { maxOutputTokens: options?.fastShort ? 320 : 450, temperature: 0.35 },
+        compressed_prompt_used: true,
         fallbackToGemini: async () => {
+          if (ex?.shouldDiscardOutgoing()) {
+            const { AiExecutionAbortedError } = await import('./src/discord/aiExecution/aiExecutionAbort');
+            throw new AiExecutionAbortedError();
+          }
           const g = await generateGeminiResponse({
-            model: 'gemini-2.5-flash',
-            prompt: contents
+            model: getModelForTask('SUMMARY'),
+            prompt: contents,
+            maxOutputTokens: options?.fastShort ? 200 : 520,
+            temperature: options?.fastShort ? 0.28 : 0.38
           });
           return asGeminiResult(g.text || '');
         }
@@ -123,9 +149,15 @@ export async function generateTrendSpecialistResponseWithProvider(topic: TrendTo
       });
       return result.text || '';
     }
+    if (ex?.shouldDiscardOutgoing()) {
+      const { AiExecutionAbortedError } = await import('./src/discord/aiExecution/aiExecutionAbort');
+      throw new AiExecutionAbortedError();
+    }
     const response = await generateGeminiResponse({
-      model: 'gemini-2.5-flash',
-      prompt: contents
+      model: getModelForTask('SUMMARY'),
+      prompt: contents,
+      maxOutputTokens: options?.fastShort ? 200 : 520,
+      temperature: options?.fastShort ? 0.28 : 0.38
     });
     return response.text || '';
   } catch (e: any) {

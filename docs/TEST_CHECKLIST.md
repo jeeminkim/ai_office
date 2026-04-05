@@ -7,7 +7,7 @@
 
 ## 0. 자동 점검 (로컬/CI)
 - [ ] `npm run build`
-- [ ] **Interaction registry 스모크(선택)**: `npm run smoke:interaction` — 라우트 개수·이름 출력(Supabase dummy env). `npm run smoke:followup-routes`, `npm run smoke:panel-restore`(경로 안내)
+- [ ] **Interaction registry 스모크(선택)**: `npm run smoke:interaction` — `routes/*.ts` 기대 파일 존재·`messageCreate.ts` / `discordBroadcastService.ts` 경로 확인·라우트 개수·이름(Supabase dummy env). `npm run smoke:followup-routes`, `npm run smoke:panel-restore`(경로 안내)
 - [ ] **Control Panel(선택)**: `npm run control-panel` → 브라우저 `http://127.0.0.1:7788` 에서 **상태판**(실행/heartbeat/`stopPhase`/마지막 중지·force fallback·다단계 검증·검사 요약, 로그 **경로 안내**). 화면에 로그 raw·stderr 원문 대량 출력 없음. `logs/control-panel/control-panel.log_*` 에 `stop_attempt_*`·`stop_force_fallback_*`·`post_stop_verification`(attemptNo 1~3)·`stop_final_status` 확인. Windows: graceful(`child_sigterm`) 후 필요 시 자동 `/F` (안전 식별 시만). 프로세스 검사·kill
 - [ ] `npm run check:schema-contract`
 - [ ] `npm run check:phase1-structure` (Supabase URL 미설정 시 dummy env로 모듈 로드만 검증)
@@ -15,7 +15,8 @@
 - [ ] `npm run check:decision-engine` (Phase 2 위원회 투표 + veto + unique 위반 처리 스모크; **기본 Phase 2 테이블 적용 후** `docs/sql/append_phase2_decision_tables_hardening.sql` 실행 시 persistence·duplicate 검증까지 가능)
 
 ## 1. 기본 기능 테스트
-- [ ] `interactionCreate` 경로: 버튼·스트링 셀렉트·모달 제출 시 `INTERACTION` 로그에 `route matched` 가 남는지(배포 후 선택 확인)
+- [ ] `interactionCreate` 경로: 버튼·스트링 셀렉트·모달 제출 시 `INTERACTION` 로그에 `route matched` 가 남는지(배포 후 선택 확인; 라우트 정의는 `handlers/interactionCreate/routes/`)
+- [ ] `messageCreate`: `!메뉴`·`!패널재설치`·`!종목추가`·`!토론` 등 기존 텍스트 진입이 `handleMessageCreate` 경로에서 동일 동작하는지(수동)
 - [ ] 봇 기동 후 메인 패널 렌더링 (`panel:main:*`)
 - [ ] 포트폴리오 보기(일반계좌) 정상 응답
 - [ ] 전체 자산 보기 정상 응답
@@ -49,7 +50,7 @@
 - [ ] `mapped_claim_id`, `mapping_method`, `mapping_score` 저장 확인(매핑 성공 시; 비UUID는 컬럼에 넣지 않음)
 - [ ] `claim_feedback` unique 제약으로 중복 방어 확인
 - [ ] 동일 버튼 연타 시 duplicate UX + `duplicate ignored` 로그
-- [ ] 피드백이 붙은 분석 메시지가 **봇 채널 메시지**로 전송됨(webhook만 사용 시 버튼이 동작하지 않을 수 있음 — `broadcastAgentResponse` 참고)
+- [ ] 피드백이 붙은 분석 메시지가 **봇 채널 메시지**로 전송됨(webhook만 사용 시 버튼이 동작하지 않을 수 있음 — `src/discord/services/discordBroadcastService.ts` 의 `broadcastAgentResponse` 참고)
 - [ ] 피드백 저장 시 `chat_history.debate_type` 오류 없음(`analysis_type`은 customId 기준)
 - [ ] 저장 실패 시 사용자에게 과도한 오류 문구 대신 짧은 안내만 노출(`index.ts`)
 
@@ -66,6 +67,28 @@
 - [ ] `followup:select|*` / `followup:menu|*` / `modal:followup:*` 클릭·제출 후 **후속 분석**(포트폴리오/오픈 토픽/트렌드)이 실행되는지 확인 — dead-end 없음
 - [ ] 로그 `FOLLOWUP_PROMPT_DETECTED`, `FOLLOWUP_SELECTED` 또는 `FOLLOWUP_INPUT_SUBMITTED`, `FOLLOWUP_EXECUTION_COMPLETED`
 - [ ] 페르소나 응답에 기술 기호가 있을 때 **쉬운 설명** 보강 및 문장이 **완결** 형태로 끝나는지 확인(`postProcessPersonaOutputForDiscord` / `ensureCompleteResponse`)
+
+## 5i. AI 분석 타임아웃·재시도 (포트폴리오 / 트렌드 / 오픈 토픽)
+
+- [ ] `npm run build` 통과
+- [ ] **`docs/sql/timeout_retry_snapshots.sql` 적용 후** 타임아웃 버튼이 **UUID** 스냅샷 기준으로 동작하는지(로그 `retrySnapshotSaved`에 `source: db`); 미적용·insert 실패 시 `source: memory` 폴백 확인
+- [ ] **90초 내 첫 유의미 브로드캐스트가 없으면** `timeoutPhase: first_visible` 로그와 조기 중단 UX
+- [ ] 첫 응답 후에는 **5분(시작 기준) 초과 시** `timeoutPhase: total` 로 중단되는지
+- [ ] 타임아웃 시 **부분 결과가 있으면** 본문에 요약·페르소나 목록이 포함되고 `partialFallbackUsed` 로그가 남는지
+- [ ] 장시간 분석(또는 임시 상수 단축 빌드)에서 중단 메시지 + **경량 / 요약 / 메인 메뉴** 버튼
+- [ ] `AI_EXECUTION_TIMEOUT`, `firstResponseSentAt`(정상 완료 시), `retrySnapshotSaved` / `retrySnapshotLoaded`, `userVisibleTimeoutMessageSent`, `AI_EXECUTION_RESULT_DISCARDED_AFTER_TIMEOUT`(늦은 전송 시)
+- [ ] `timeout:retry:light:*` / `summary:*` 경량·요약 재실행, **봇 재시작 후에도** DB 스냅샷이 있으면 UUID 버튼이 동작하는지
+
+## 5j. AI 성능 경로(압축·병렬·`AI_PERF`)
+
+- [ ] `npm run build` 통과
+- [ ] 포트폴리오 전체 위원 실행 시 로그에 `AI_PERF` — `parallel_ray_hindenburg_window_ms` 또는 `persona_parallel_wall_time_ms`, `persona_execution_time`(Ray/Hindenburg에 `parallel_execution_used: true`), `portfolio_pipeline_complete`, **`execution_summary`**에 `total_execution_time_ms`·`prompt_build_time_ms`·`cio_stage_time_ms`·`compressed_prompt_mode`(`standard_compressed` / `aggressive_compressed`)·`retry_mode_used`·`partial_fallback_used`
+- [ ] 첫 브로드캐스트 직후 **`first_visible_latency_ms`**가 `AI_PERF`에 남는지(실행 시작 대비)
+- [ ] 오픈 토픽에서 페르소나 2명 이상일 때 `open_topic_persona`에 `parallel_execution_used: true`가 찍히는지
+- [ ] 조기 브로드캐스트 사용 시 **동일 페르소나 본문이 두 번** 오지 않는지(`index.ts` 스킵); **`FEEDBACK_FOLLOWUP_ATTACH_PENDING` → `ATTACHED`** 후 follow-up 메시지에 피드백 행 1회(중복 `ATTACHED` 없음)
+- [ ] `timeout:return:menu:*` 시 스냅샷 해제·메인 패널
+- [ ] 동일 사용자 검증·decision/follow-up/feedback과 `customId` 충돌 없음
+- [ ] **자동 매매·trade_history 자동 변경 없음**
 
 ## 5g. 운영 안정화 (quote / 패널 / 로그 / 컴포넌트)
 - [ ] Yahoo 401 시 `yahoo_v7_http_error` / `yahoo_chart_http_error` 구조화 로그 및 종목별 `request_failure_reason`·`is_stale` 메타

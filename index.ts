@@ -3,12 +3,12 @@ import {
     Client,
     GatewayIntentBits,
     WebhookClient,
-    Message,
     ActionRowBuilder,
     ButtonBuilder,
     ButtonStyle,
     EmbedBuilder,
     Interaction,
+    Message,
     Events,
     InteractionType,
     StringSelectMenuBuilder
@@ -57,25 +57,12 @@ import { splitDiscordMessage, chooseInteractionRoute } from './discordResponseUt
 import { generateGeminiResponse } from './geminiLlmService';
 import type { PersonaKey } from './analysisTypes';
 import { insertChatHistoryWithLegacyFallback } from './src/repositories/chatHistoryRepository';
-import {
-    detectFinancialIntent,
-    normalizeProviderOutputForDiscord,
-    personaKeyToPersonaName
-} from './src/discord/analysisFormatting';
-import { analyzeFollowupPrompt, buildFollowupComponentRows } from './followupPromptService';
-import { insertFollowupSnapshot } from './src/repositories/followupRepository';
+import { detectFinancialIntent, normalizeProviderOutputForDiscord } from './src/discord/analysisFormatting';
 import { runPortfolioDebateAppService } from './src/application/runPortfolioDebateAppService';
 import { formatDecisionSummaryForDiscord } from './src/application/runDecisionEngineAppService';
 import { buildRebalancePlanAppService } from './src/application/buildRebalancePlanAppService';
 import { runTrendAnalysisAppService } from './src/application/runTrendAnalysisAppService';
 import { runOpenTopicDebateAppService } from './src/application/runOpenTopicDebateAppService';
-import {
-    isDecisionPrompt,
-    extractDecisionOptions,
-    buildDecisionButtonsRow,
-    logDecisionPromptDetected
-} from './decisionPrompt';
-import { insertDecisionSnapshot } from './src/repositories/decisionRepository';
 import { parseCashflowFlowType } from './src/finance/cashflowCategories';
 import { createPanelAdapter } from './src/discord/adapters/panelAdapter';
 import type { DiscordInteractionContext, UserRiskMode } from './src/discord/InteractionContext';
@@ -84,6 +71,15 @@ import { parsePositiveAmount, parseNumberStrict, normalizeSymbol, sanitizeDescri
 import { logSchemaSafeInsertFailure } from './src/discord/schemaInsertErrors';
 import { dispatchRoutesInOrder } from './src/discord/interactionRegistry';
 import { buildInteractionRoutes } from './src/discord/handlers/interactionCreate/buildInteractionRoutes';
+import {
+    broadcastAgentResponse,
+    sendFeedbackFollowupAttachMessage,
+    sendPostNavigationReply,
+    type DiscordBroadcastDeps
+} from './src/discord/services/discordBroadcastService';
+import { handleMessageCreate, type MessageCreateContext } from './src/discord/handlers/messageCreate';
+import { runUserVisibleAiExecution } from './src/discord/aiExecution/runUserVisibleAiExecution';
+import type { AiExecutionHandle } from './src/discord/aiExecution/aiExecutionHandle';
 
 logger.info('BOOT', 'index initialization started');
 
@@ -124,6 +120,13 @@ const client = new Client({
 });
 const webhook = new WebhookClient({ url: WEBHOOK_URL });
 startHeartbeat();
+
+const discordBroadcastDeps: DiscordBroadcastDeps = {
+    webhook,
+    logger,
+    updateHealth,
+    getQuickNavigationRows
+};
 
 function formatKrw(v: number): string {
     return `${Math.round(v).toLocaleString('ko-KR')}원`;
@@ -807,249 +810,6 @@ function startWeeklyReportScheduler() {
     }, 60 * 60 * 1000);
 }
 
-function isTrendQueryCheck(query: string): boolean {
-    return /(트렌드|유행|k-?pop|드라마|넷플릭스|스포츠|콘텐츠|아이돌|엔터|기회|시장)/i.test(query);
-}
-
-const DISCORD_CONTENT_MAX = 2000;
-const DISCORD_BODY_CHUNK = 1800;
-/** Discord 메시지당 ActionRow 상한(버튼/셀렉트 행 합산) */
-const DISCORD_COMPONENT_ROW_LIMIT = 5;
-
-function prioritizeDiscordComponentRows(
-    decisionRows: ActionRowBuilder<ButtonBuilder>[],
-    followupRows: ActionRowBuilder<ButtonBuilder | StringSelectMenuBuilder>[],
-    feedbackRow: ActionRowBuilder<ButtonBuilder> | null | undefined
-): { rows: ActionRowBuilder<ButtonBuilder | StringSelectMenuBuilder>[]; dropped: string[] } {
-    const ordered: ActionRowBuilder<ButtonBuilder | StringSelectMenuBuilder>[] = [
-        ...decisionRows,
-        ...followupRows,
-        ...(feedbackRow ? [feedbackRow as ActionRowBuilder<ButtonBuilder | StringSelectMenuBuilder>] : [])
-    ];
-    if (ordered.length <= DISCORD_COMPONENT_ROW_LIMIT) {
-        return { rows: ordered, dropped: [] };
-    }
-    const dropped: string[] = [];
-    const d = [...decisionRows];
-    let budget = DISCORD_COMPONENT_ROW_LIMIT - d.length;
-    const maxFollow = Math.min(followupRows.length, Math.max(0, budget));
-    const fTake = followupRows.slice(0, maxFollow);
-    if (followupRows.length > fTake.length) {
-        dropped.push('followup_overflow');
-    }
-    budget -= fTake.length;
-    const fbTake =
-        feedbackRow && budget > 0
-            ? [feedbackRow as ActionRowBuilder<ButtonBuilder | StringSelectMenuBuilder>]
-            : [];
-    if (!fbTake.length && feedbackRow) {
-        dropped.push('feedback');
-    }
-    return { rows: [...d, ...fTake, ...fbTake], dropped };
-}
-
-async function sendPostNavigationReply(sourceInteraction: Interaction | Message, highlight: QuickNavHighlight) {
-    try {
-        const rows = getQuickNavigationRows({ highlight });
-        const src: any = sourceInteraction;
-        if (typeof src.followUp === 'function') {
-            await src.followUp({
-                content: '**다음 메뉴** — 스크롤 없이 바로 선택할 수 있습니다.',
-                components: rows,
-                ephemeral: true
-            });
-            logger.info('UI', 'post_response_navigation_attached', { mode: 'followUp', highlight });
-        } else if (src.channel?.send) {
-            await src.channel.send({
-                content: '**다음 메뉴** — 스크롤 없이 바로 선택할 수 있습니다.',
-                components: rows
-            });
-            logger.info('UI', 'post_response_navigation_attached', { mode: 'channel_send', highlight });
-        }
-    } catch (e: any) {
-        logger.warn('UI', 'post_response_navigation_failed', { message: e?.message });
-    }
-}
-
-async function broadcastAgentResponse(
-    userId: string,
-    agentName: string,
-    avatarURL: string,
-    content: string,
-    sourceInteraction: Interaction | Message,
-    feedbackRow?: ActionRowBuilder<ButtonBuilder> | null,
-    decisionCtx?: { chatHistoryId: number; analysisType: string; personaKey?: PersonaKey } | null
-) {
-    let finalContent = content;
-    let noDataBodyNote = '';
-
-    if (finalContent.includes('[REASON: NO_DATA]')) {
-        finalContent = finalContent.replace(/\[REASON: NO_DATA\]/g, '').trim();
-        noDataBodyNote =
-            '\n\n⚠️ **NO_DATA** — 포트폴리오·소비·현금흐름 데이터가 부족합니다. 메인 패널에서 종목 등록·소비·현금흐름 입력 후 다시 시도해 주세요. _(버튼 행은 decision/follow-up 우선순위로 생략될 수 있음)_';
-        logger.info('UI', 'NO_DATA inlined to body (no NO_DATA button row in broadcast)');
-    }
-
-    const decisionRows: ActionRowBuilder<ButtonBuilder>[] = [];
-    if (decisionCtx && isDecisionPrompt(finalContent)) {
-        const opts = extractDecisionOptions(finalContent);
-        logDecisionPromptDetected(decisionCtx.chatHistoryId, decisionCtx.analysisType, opts);
-        const snap = await insertDecisionSnapshot({
-            discordUserId: userId,
-            chatHistoryRef: String(decisionCtx.chatHistoryId),
-            analysisType: decisionCtx.analysisType,
-            personaKey: decisionCtx.personaKey ?? null,
-            options: opts
-        });
-        if (snap?.id) {
-            decisionRows.push(buildDecisionButtonsRow(snap.id, opts));
-            logger.info('DECISION', 'DECISION_SNAPSHOT_SAVED', {
-                snapshot_id: snap.id,
-                chat_history_id: decisionCtx.chatHistoryId,
-                option_count: opts.length
-            });
-            logger.info('DECISION', 'DECISION_COMPONENT_ATTACHED', { rows: decisionRows.length });
-            updateHealth(s => {
-                s.ux.lastDecisionSnapshotSavedAt = new Date().toISOString();
-                s.ux.lastDecisionAttached = true;
-            });
-        } else {
-            logger.warn('DECISION', 'DECISION_COMPONENT_SKIPPED', { reason: 'snapshot_insert_failed' });
-            updateHealth(s => {
-                s.ux.lastDecisionAttached = false;
-            });
-        }
-    }
-
-    const followupRows: ActionRowBuilder<ButtonBuilder | StringSelectMenuBuilder>[] = [];
-    if (decisionCtx && !isDecisionPrompt(finalContent)) {
-        const fu = analyzeFollowupPrompt(finalContent);
-        if (fu.shouldAttach) {
-            const ins = await insertFollowupSnapshot({
-                discordUserId: userId,
-                chatHistoryRef: String(decisionCtx.chatHistoryId),
-                analysisType: decisionCtx.analysisType,
-                personaName: decisionCtx.personaKey ? personaKeyToPersonaName(decisionCtx.personaKey) : null,
-                promptType: fu.promptType,
-                options: fu.options
-            });
-            if (ins?.id) {
-                followupRows.push(...buildFollowupComponentRows(ins.id, fu.promptType, fu.options));
-                logger.info('FOLLOWUP', 'FOLLOWUP_SNAPSHOT_SAVED', {
-                    snapshot_id: ins.id,
-                    prompt_type: fu.promptType,
-                    option_count: fu.options.length
-                });
-                logger.info('FOLLOWUP', 'FOLLOWUP_COMPONENT_ATTACHED', { rows: followupRows.length });
-                updateHealth(s => {
-                    s.ux.lastFollowupDetectedAt = new Date().toISOString();
-                    s.ux.lastFollowupType = fu.promptType;
-                    s.ux.lastFollowupAttached = true;
-                });
-            } else {
-                logger.warn('FOLLOWUP', 'FOLLOWUP_COMPONENT_SKIPPED', { reason: 'snapshot_insert_failed' });
-                updateHealth(s => {
-                    s.ux.lastFollowupAttached = false;
-                });
-            }
-        } else {
-            logger.info('FOLLOWUP', 'FOLLOWUP_COMPONENT_SKIPPED', { reason: 'heuristic_not_matched' });
-        }
-    }
-
-    const prioritized = prioritizeDiscordComponentRows(decisionRows, followupRows, feedbackRow);
-    if (prioritized.dropped.length) {
-        logger.warn('UI', 'UI_COMPONENT_POLICY', {
-            dropped: prioritized.dropped,
-            decision_rows: decisionRows.length,
-            followup_rows: followupRows.length,
-            had_feedback: !!feedbackRow
-        });
-        updateHealth(s => {
-            s.ux.lastUiComponentPolicy = prioritized.dropped.join(',');
-        });
-    }
-
-    const originalLen = finalContent.length;
-    if (originalLen > 12000) {
-        logger.info('DISCORD', 'response summarized for limit', { originalLength: originalLen, agentName });
-        finalContent =
-            finalContent.slice(0, 12000) + '\n\n_(응답이 길어 이후 생략)_';
-    }
-
-    const defaultAvatar = 'https://upload.wikimedia.org/wikipedia/commons/e/ef/System_Preferences_icon_Apple.png';
-
-    const bodyChunks = splitDiscordMessage(finalContent, DISCORD_BODY_CHUNK);
-    if (bodyChunks.length > 1) {
-        logger.info('DISCORD', 'long response chunked', { parts: bodyChunks.length, agentName });
-    }
-    if (bodyChunks.length > 1 && (decisionRows.length > 0 || followupRows.length > 0 || !!feedbackRow)) {
-        logger.info('UI', 'interactive_components_on_first_chunk_only', {
-            parts: bodyChunks.length,
-            has_decision: decisionRows.length > 0,
-            has_followup: followupRows.length > 0,
-            has_feedback: !!feedbackRow
-        });
-    }
-
-    const sendParts = async (useWebhook: boolean) => {
-        for (let i = 0; i < bodyChunks.length; i++) {
-            const header =
-                bodyChunks.length === 1
-                    ? `## ${agentName}\n`
-                    : `## ${agentName} (${i + 1}/${bodyChunks.length})\n`;
-            let piece = header + bodyChunks[i];
-            if (i === 0 && noDataBodyNote) {
-                piece += noDataBodyNote;
-            }
-            if (i === 0 && feedbackRow) {
-                piece += '\n\n_이 분석이 유용했나요? 아래 버튼(👍 신뢰 / ✅ 채택 / 📌 저장 / 👎 별로)으로 바로 평가해 주세요._';
-            }
-            if (piece.length > DISCORD_CONTENT_MAX) {
-                piece = piece.slice(0, DISCORD_CONTENT_MAX - 1) + '…';
-            }
-            const componentsToSend =
-                i === 0 ? prioritized.rows : undefined;
-
-            const hasInteractiveComponents = !!(componentsToSend && componentsToSend.length);
-            const useWebhookForThisPart = useWebhook && !hasInteractiveComponents;
-
-            if (useWebhookForThisPart) {
-                await webhook.send({
-                    content: piece,
-                    username: agentName,
-                    avatarURL: avatarURL || defaultAvatar,
-                    components: undefined
-                });
-            } else {
-                const ch = (sourceInteraction as any).channel;
-                if (!ch) {
-                    throw new Error('broadcastAgentResponse: no channel on sourceInteraction');
-                }
-                await ch.send({
-                    content: piece,
-                    components: componentsToSend && componentsToSend.length ? componentsToSend : undefined
-                });
-            }
-        }
-    };
-
-    try {
-        await sendParts(true);
-    } catch (e: any) {
-        logger.error('DISCORD', `Webhook send error: ${e.message}`, e);
-        if (sourceInteraction && (sourceInteraction as any).channel) {
-            try {
-                await sendParts(false);
-            } catch (e2: any) {
-                logger.error('DISCORD', `channel send error: ${e2.message}`, e2);
-            }
-        }
-    }
-
-    return finalContent;
-}
-
 async function getFinancialAnchorState(userId: string): Promise<{ hasPortfolio: boolean; hasLifestyle: boolean }> {
     try {
         const [portfolioRes, expensesRes, cashflowRes] = await Promise.all([
@@ -1121,22 +881,61 @@ async function runTrendAnalysis(
     userId: string,
     userQuery: string,
     sourceInteraction: any,
-    topic: TrendTopicKind,
-    triggerCustomId?: string
+    topic: TrendTopicKind | 'free',
+    triggerCustomId?: string,
+    opts?: { fastMode?: 'none' | 'short' }
 ) {
     try {
-        const out = await runTrendAnalysisAppService({ userId, userQuery, topic, triggerCustomId });
-        const feedbackRow = out.chatHistoryId ? getFeedbackButtonsRow(out.chatHistoryId, out.analysisType, 'TREND') : null;
-        const decisionCtx =
-            out.chatHistoryId != null
-                ? {
-                      chatHistoryId: out.chatHistoryId,
-                      analysisType: out.analysisType,
-                      personaKey: 'TREND' as PersonaKey
-                  }
-                : null;
-        await broadcastAgentResponse(userId, out.agentLabel, out.avatarUrl, out.text, sourceInteraction, feedbackRow, decisionCtx);
-        await sendPostNavigationReply(sourceInteraction, 'trend');
+        const execRes = await runUserVisibleAiExecution({
+            userId,
+            route: 'trend',
+            sourceInteraction,
+            safeEditReply,
+            safeReplyOrFollowUp,
+            execute: async (handle: AiExecutionHandle) => {
+                const fastMode = opts?.fastMode === 'short' ? 'short' : 'none';
+                const out = await runTrendAnalysisAppService({
+                    userId,
+                    userQuery,
+                    topic,
+                    triggerCustomId,
+                    execution: handle,
+                    fastMode
+                });
+                const feedbackRow = out.chatHistoryId ? getFeedbackButtonsRow(out.chatHistoryId, out.analysisType, 'TREND') : null;
+                const decisionCtx =
+                    out.chatHistoryId != null
+                        ? {
+                              chatHistoryId: out.chatHistoryId,
+                              analysisType: out.analysisType,
+                              personaKey: 'TREND' as PersonaKey
+                          }
+                        : null;
+                await broadcastAgentResponse(
+                    userId,
+                    out.agentLabel,
+                    out.avatarUrl,
+                    out.text,
+                    sourceInteraction,
+                    feedbackRow,
+                    decisionCtx,
+                    discordBroadcastDeps,
+                    handle
+                );
+                if (!handle.shouldDiscardOutgoing()) {
+                    await sendPostNavigationReply(sourceInteraction, 'trend', discordBroadcastDeps);
+                }
+                return out;
+            },
+            buildPendingPayload: () => ({
+                userId,
+                userQuery,
+                route: 'trend',
+                triggerCustomId,
+                topic
+            })
+        });
+        if (!execRes.ok) return;
     } catch (err: any) {
         logger.error('ROUTER', '트렌드 분석 에러: ' + err.message, err);
     }
@@ -1196,11 +995,17 @@ async function runDataCenterAction(
         personaKey: 'THIEL'
     })}`;
     await safeSendChunkedInteractionContent(sourceInteraction, { content }, `data_center:${action}`);
-    if (sourceInteraction) await sendPostNavigationReply(sourceInteraction, 'data_center');
+    if (sourceInteraction) await sendPostNavigationReply(sourceInteraction, 'data_center', discordBroadcastDeps);
 }
 
 /** Phase 2.5 — shadow 리밸런싱 실행안(자동 주문 없음). trade_history는 「완료」버튼 후에만 반영. */
-async function postShadowRebalanceFollowUp(userId: string, result: Awaited<ReturnType<typeof runPortfolioDebateAppService>>, sourceInteraction: Interaction) {
+async function postShadowRebalanceFollowUp(
+    userId: string,
+    result: Awaited<ReturnType<typeof runPortfolioDebateAppService>>,
+    sourceInteraction: Interaction | Message,
+    executionHandle?: AiExecutionHandle | null
+) {
+    if (executionHandle?.shouldDiscardOutgoing()) return;
     if (result.status !== 'ok' || !result.chatHistoryId || !result.decisionArtifact) return;
     try {
         const mode = await loadUserMode(userId);
@@ -1237,288 +1042,304 @@ async function postShadowRebalanceFollowUp(userId: string, result: Awaited<Retur
 }
 
 /** 금융/포트폴리오 5인 토론 — application 계층에서 LLM·저장 수행 */
-async function runPortfolioDebate(userId: string, userQuery: string, sourceInteraction: any) {
+async function runPortfolioDebate(
+    userId: string,
+    userQuery: string,
+    sourceInteraction: any,
+    opts?: { fastMode?: 'none' | 'light_summary' | 'short_summary' }
+) {
     try {
-        const result = await runPortfolioDebateAppService({
+        const execRes = await runUserVisibleAiExecution({
             userId,
-            userQuery,
-            triggerCustomId: sourceInteraction?.customId,
-            loadUserMode,
-            getFinancialAnchorState: () => getFinancialAnchorState(userId)
+            route: 'portfolio',
+            sourceInteraction,
+            safeEditReply,
+            safeReplyOrFollowUp,
+            execute: async (handle: AiExecutionHandle) => {
+                const streamedPortfolioSegKeys = new Set<PersonaKey>();
+                const result = await runPortfolioDebateAppService({
+                    userId,
+                    userQuery,
+                    triggerCustomId: sourceInteraction?.customId,
+                    loadUserMode,
+                    getFinancialAnchorState: () => getFinancialAnchorState(userId),
+                    execution: handle,
+                    fastMode: opts?.fastMode ?? 'none',
+                    onPersonaSegmentReady: async seg => {
+                        if (handle.shouldDiscardOutgoing()) return;
+                        streamedPortfolioSegKeys.add(seg.key);
+                        await broadcastAgentResponse(
+                            userId,
+                            seg.agentName,
+                            seg.avatarUrl,
+                            seg.text,
+                            sourceInteraction,
+                            null,
+                            null,
+                            discordBroadcastDeps,
+                            handle
+                        );
+                        if (!handle.shouldDiscardOutgoing()) {
+                            handle.registerPendingFeedbackFollowup(seg.key);
+                        }
+                    }
+                });
+                if (result.status === 'gate_lifestyle') {
+                    handle.clearAllPendingFeedbackFollowup('gate_lifestyle');
+                    await sendGateEmbed(
+                        sourceInteraction,
+                        '소비·현금흐름 데이터가 없어 이 분석은 실행할 수 없습니다.\n지출 또는 현금흐름을 먼저 등록해 주세요.'
+                    );
+                    return;
+                }
+                if (result.status === 'gate_no_portfolio') {
+                    handle.clearAllPendingFeedbackFollowup('gate_no_portfolio');
+                    const embed = new EmbedBuilder()
+                        .setTitle('[System]')
+                        .setDescription(
+                            '분석에 필요한 포트폴리오(보유 종목) 데이터가 없습니다.\n\n아래 버튼으로 먼저 종목을 등록해 주세요.'
+                        )
+                        .setColor('#e74c3c');
+                    if (sourceInteraction.isButton?.() || sourceInteraction.isModalSubmit?.()) {
+                        await sourceInteraction.followUp({ embeds: [embed], components: [getNoDataButtons()] });
+                    } else {
+                        await sourceInteraction.reply({ embeds: [embed], components: [getNoDataButtons()] });
+                    }
+                    return;
+                }
+                if (result.status === 'aborted_silent') {
+                    handle.clearAllPendingFeedbackFollowup('aborted_silent');
+                    return;
+                }
+                for (const seg of result.segments) {
+                    if (streamedPortfolioSegKeys.has(seg.key)) continue;
+                    const feedbackRow = result.chatHistoryId
+                        ? getFeedbackButtonsRow(result.chatHistoryId, result.analysisType, seg.key)
+                        : null;
+                    const decisionCtx =
+                        result.chatHistoryId != null
+                            ? {
+                                  chatHistoryId: result.chatHistoryId,
+                                  analysisType: result.analysisType,
+                                  personaKey: seg.key
+                              }
+                            : null;
+                    await broadcastAgentResponse(
+                        userId,
+                        seg.agentName,
+                        seg.avatarUrl,
+                        seg.text,
+                        sourceInteraction,
+                        feedbackRow,
+                        decisionCtx,
+                        discordBroadcastDeps,
+                        handle
+                    );
+                }
+                if (result.chatHistoryId) {
+                    const pendingFeedbackKeys = [...handle.getPendingFeedbackFollowupKeys()];
+                    for (const pk of pendingFeedbackKeys) {
+                        const seg = result.segments.find(s => s.key === pk);
+                        if (!seg) {
+                            handle.markFeedbackFollowupSkipped(pk, 'segment_missing');
+                            continue;
+                        }
+                        const row = getFeedbackButtonsRow(result.chatHistoryId, result.analysisType, pk);
+                        const ok = await sendFeedbackFollowupAttachMessage(
+                            sourceInteraction,
+                            discordBroadcastDeps,
+                            {
+                                agentName: seg.agentName,
+                                feedbackRow: row,
+                                executionHandle: handle
+                            }
+                        );
+                        if (ok) handle.markFeedbackFollowupAttached(pk);
+                        else handle.markFeedbackFollowupSkipped(pk, 'followup_send_failed');
+                    }
+                } else {
+                    handle.clearAllPendingFeedbackFollowup('no_chat_history_id');
+                }
+                if (result.decisionArtifact) {
+                    let summary = formatDecisionSummaryForDiscord(result.decisionArtifact);
+                    if (result.feedbackCalibrationLine) {
+                        summary += `\n\n_${result.feedbackCalibrationLine}_`;
+                    }
+                    const decisionCtxSummary =
+                        result.chatHistoryId != null
+                            ? {
+                                  chatHistoryId: result.chatHistoryId,
+                                  analysisType: result.analysisType,
+                                  personaKey: 'CIO' as PersonaKey
+                              }
+                            : null;
+                    await broadcastAgentResponse(
+                        userId,
+                        '투자위원회 · 결정 요약',
+                        'https://upload.wikimedia.org/wikipedia/commons/e/ef/System_Preferences_icon_Apple.png',
+                        summary,
+                        sourceInteraction,
+                        null,
+                        decisionCtxSummary,
+                        discordBroadcastDeps,
+                        handle
+                    );
+                }
+                if (!handle.shouldDiscardOutgoing()) {
+                    await postShadowRebalanceFollowUp(userId, result, sourceInteraction, handle);
+                    await sendPostNavigationReply(sourceInteraction, 'ai', discordBroadcastDeps);
+                }
+                return result;
+            },
+            buildPendingPayload: () => ({
+                userId,
+                userQuery,
+                route: 'portfolio',
+                triggerCustomId: sourceInteraction?.customId
+            })
         });
-        if (result.status === 'gate_lifestyle') {
-            await sendGateEmbed(
-                sourceInteraction,
-                '소비·현금흐름 데이터가 없어 이 분석은 실행할 수 없습니다.\n지출 또는 현금흐름을 먼저 등록해 주세요.'
-            );
-            return;
-        }
-        if (result.status === 'gate_no_portfolio') {
-            const embed = new EmbedBuilder()
-                .setTitle('[System]')
-                .setDescription('분석에 필요한 포트폴리오(보유 종목) 데이터가 없습니다.\n\n아래 버튼으로 먼저 종목을 등록해 주세요.')
-                .setColor('#e74c3c');
-            if (sourceInteraction.isButton?.() || sourceInteraction.isModalSubmit?.()) {
-                await sourceInteraction.followUp({ embeds: [embed], components: [getNoDataButtons()] });
-            } else {
-                await sourceInteraction.reply({ embeds: [embed], components: [getNoDataButtons()] });
-            }
-            return;
-        }
-        if (result.status === 'aborted_silent') {
-            return;
-        }
-        for (const seg of result.segments) {
-            const feedbackRow = result.chatHistoryId
-                ? getFeedbackButtonsRow(result.chatHistoryId, result.analysisType, seg.key)
-                : null;
-            const decisionCtx =
-                result.chatHistoryId != null
-                    ? {
-                          chatHistoryId: result.chatHistoryId,
-                          analysisType: result.analysisType,
-                          personaKey: seg.key
-                      }
-                    : null;
-            await broadcastAgentResponse(
-                userId,
-                seg.agentName,
-                seg.avatarUrl,
-                seg.text,
-                sourceInteraction,
-                feedbackRow,
-                decisionCtx
-            );
-        }
-        if (result.decisionArtifact) {
-            let summary = formatDecisionSummaryForDiscord(result.decisionArtifact);
-            if (result.feedbackCalibrationLine) {
-                summary += `\n\n_${result.feedbackCalibrationLine}_`;
-            }
-            const decisionCtxSummary =
-                result.chatHistoryId != null
-                    ? {
-                          chatHistoryId: result.chatHistoryId,
-                          analysisType: result.analysisType,
-                          personaKey: 'CIO' as PersonaKey
-                      }
-                    : null;
-            await broadcastAgentResponse(
-                userId,
-                '투자위원회 · 결정 요약',
-                'https://upload.wikimedia.org/wikipedia/commons/e/ef/System_Preferences_icon_Apple.png',
-                summary,
-                sourceInteraction,
-                null,
-                decisionCtxSummary
-            );
-        }
-        await postShadowRebalanceFollowUp(userId, result, sourceInteraction);
-        await sendPostNavigationReply(sourceInteraction, 'ai');
+        if (!execRes.ok) return;
     } catch (err: any) {
         logger.error('ROUTER', '포트폴리오 토론 에러: ' + err.message, err);
     }
 }
 
 /** 자유 주제 토론 — application 계층에서 LLM·저장 수행 */
-async function runOpenTopicDebate(userId: string, userQuery: string, sourceInteraction: any) {
+async function runOpenTopicDebate(
+    userId: string,
+    userQuery: string,
+    sourceInteraction: any,
+    opts?: { fastMode?: 'none' | 'light_summary' | 'short_summary' }
+) {
     try {
-        const out = await runOpenTopicDebateAppService({ userId, userQuery, loadUserMode });
-        for (const b of out.broadcasts) {
-            const feedbackRow = out.chatHistoryId ? getFeedbackButtonsRow(out.chatHistoryId, out.analysisType, b.personaKey) : null;
-            const decisionCtx =
-                out.chatHistoryId != null
-                    ? {
-                          chatHistoryId: out.chatHistoryId,
-                          analysisType: out.analysisType,
-                          personaKey: b.personaKey
-                      }
-                    : null;
-            await broadcastAgentResponse(userId, b.agentName, b.avatarUrl, b.text, sourceInteraction, feedbackRow, decisionCtx);
-        }
-        await sendPostNavigationReply(sourceInteraction, 'ai');
+        const execRes = await runUserVisibleAiExecution({
+            userId,
+            route: 'open_topic',
+            sourceInteraction,
+            safeEditReply,
+            safeReplyOrFollowUp,
+            execute: async (handle: AiExecutionHandle) => {
+                const streamedOpenTopicKeys = new Set<PersonaKey>();
+                const out = await runOpenTopicDebateAppService({
+                    userId,
+                    userQuery,
+                    loadUserMode,
+                    execution: handle,
+                    fastMode: opts?.fastMode ?? 'none',
+                    onPersonaReady: async b => {
+                        if (handle.shouldDiscardOutgoing()) return;
+                        streamedOpenTopicKeys.add(b.personaKey);
+                        await broadcastAgentResponse(
+                            userId,
+                            b.agentName,
+                            b.avatarUrl,
+                            b.text,
+                            sourceInteraction,
+                            null,
+                            null,
+                            discordBroadcastDeps,
+                            handle
+                        );
+                        if (!handle.shouldDiscardOutgoing()) {
+                            handle.registerPendingFeedbackFollowup(b.personaKey);
+                        }
+                    }
+                });
+                for (const b of out.broadcasts) {
+                    if (streamedOpenTopicKeys.has(b.personaKey)) continue;
+                    const feedbackRow = out.chatHistoryId
+                        ? getFeedbackButtonsRow(out.chatHistoryId, out.analysisType, b.personaKey)
+                        : null;
+                    const decisionCtx =
+                        out.chatHistoryId != null
+                            ? {
+                                  chatHistoryId: out.chatHistoryId,
+                                  analysisType: out.analysisType,
+                                  personaKey: b.personaKey
+                              }
+                            : null;
+                    await broadcastAgentResponse(
+                        userId,
+                        b.agentName,
+                        b.avatarUrl,
+                        b.text,
+                        sourceInteraction,
+                        feedbackRow,
+                        decisionCtx,
+                        discordBroadcastDeps,
+                        handle
+                    );
+                }
+                if (out.chatHistoryId) {
+                    const pendingOt = [...handle.getPendingFeedbackFollowupKeys()];
+                    for (const pk of pendingOt) {
+                        const b = out.broadcasts.find(x => x.personaKey === pk);
+                        if (!b) {
+                            handle.markFeedbackFollowupSkipped(pk, 'segment_missing');
+                            continue;
+                        }
+                        const row = getFeedbackButtonsRow(out.chatHistoryId, out.analysisType, pk);
+                        const ok = await sendFeedbackFollowupAttachMessage(
+                            sourceInteraction,
+                            discordBroadcastDeps,
+                            {
+                                agentName: b.agentName,
+                                feedbackRow: row,
+                                executionHandle: handle
+                            }
+                        );
+                        if (ok) handle.markFeedbackFollowupAttached(pk);
+                        else handle.markFeedbackFollowupSkipped(pk, 'followup_send_failed');
+                    }
+                } else {
+                    handle.clearAllPendingFeedbackFollowup('no_chat_history_id');
+                }
+                if (!handle.shouldDiscardOutgoing()) {
+                    await sendPostNavigationReply(sourceInteraction, 'ai', discordBroadcastDeps);
+                }
+                return out;
+            },
+            buildPendingPayload: () => ({
+                userId,
+                userQuery,
+                route: 'open_topic',
+                triggerCustomId: sourceInteraction?.customId
+            })
+        });
+        if (!execRes.ok) return;
     } catch (err: any) {
         logger.error('ROUTER', '오픈 토픽 토론 에러: ' + err.message, err);
     }
 }
 
-client.on('messageCreate', async (message: Message) => {
-    if (message.author.bot) return;
-
-    if (message.content.startsWith('!')) {
-        logger.info('COMMAND', `message command received: ${message.content}`, { user: message.author.tag });
+const messageCreateCtx: MessageCreateContext = {
+    logger,
+    supabase,
+    getDiscordUserId,
+    loadPanelState,
+    savePanelState,
+    getMainPanel,
+    updateHealth,
+    resolveInstrumentMetadata,
+    normalizeSymbol,
+    parseNumberStrict,
+    parseCashflowFlowType,
+    recordBuyTrade,
+    learnBehaviorFromTrades,
+    createAccount,
+    GENERAL_ACCOUNT_NAME,
+    decideOrchestratorRoute,
+    logOrchestratorDecision,
+    detectFinancialIntent,
+    runtime: {
+        runTrendAnalysis,
+        runPortfolioDebate,
+        runOpenTopicDebate
     }
+};
 
-    if (message.content === '!메뉴' || message.content === '!패널재설치') {
-        const state = loadPanelState();
-        let msg: any = null;
-        if (state?.channelId === message.channel.id && state.messageId) {
-            const oldMsg = await (message.channel as any).messages.fetch(state.messageId).catch(() => null);
-            if (oldMsg) {
-                msg = await oldMsg.edit(getMainPanel()).catch(() => null);
-            }
-        }
-        if (!msg) {
-            msg = await message.reply(getMainPanel());
-        }
-        savePanelState(msg.channel.id, msg.id);
-        logger.info('PANEL', 'Explicit reinstall via text command', {
-            channelId: msg.channel.id,
-            messageId: msg.id,
-            mode: msg.id === state?.messageId ? 'edit_existing' : 'send_new'
-        });
-        updateHealth(s => s.panels.lastPanelAction = 'manual_reinstall');
-        return;
-    }
-
-    if (message.content.startsWith('!종목추가')) {
-        const parts = message.content.split(' ');
-        if (parts.length < 4) return message.reply("❌ 사용법: `!종목추가 [심볼] [수량] [평단가] [종목명?] [섹터?]`");
-        const [_, symbolInput, qtyStr, priceStr, name = symbolInput, sector = 'Unknown'] = parts;
-        const resolved = resolveInstrumentMetadata(symbolInput, undefined);
-        const normalizedSymbol = resolved?.symbol || normalizeSymbol(symbolInput);
-        const market = resolved?.market || 'KR';
-        const currency = resolved?.currency || 'KRW';
-        const displayName = resolved?.displayName || name;
-        const quoteSymbol = resolved?.quoteSymbol || normalizedSymbol;
-        const exchange = resolved?.exchange || null;
-        const qty = parseNumberStrict(qtyStr);
-        const price = parseNumberStrict(priceStr);
-        if (qty === null || price === null) return message.reply("❌ 수량과 평단가는 숫자로 입력해주세요.");
-
-        await supabase.from('stocks').upsert({ symbol: normalizedSymbol, name: displayName, sector });
-        try {
-            await recordBuyTrade({
-                discordUserId: getDiscordUserId(message.author),
-                symbol: normalizedSymbol,
-                displayName,
-                quoteSymbol,
-                exchange,
-                market: market === 'US' ? 'US' : 'KR',
-                currency: currency === 'USD' ? 'USD' : 'KRW',
-                purchaseCurrency: market === 'US' ? (currency === 'USD' ? 'USD' : 'KRW') : 'KRW',
-                quantity: qty,
-                pricePerUnit: price,
-                memo: '!종목추가'
-            });
-            void learnBehaviorFromTrades(getDiscordUserId(message.author));
-        } catch (e: any) {
-            logger.error('DATABASE', 'trade buy record failure', e);
-            return message.reply(`❌ 등록 실패: ${e?.message || String(e)}`);
-        }
-        return message.reply(`✅ **${displayName}(${quoteSymbol})** 종목 추가 완료! (거래 원장 반영)`);
-    }
-
-    if (message.content.startsWith('!계좌추가')) {
-        const parts = message.content.trim().split(/\s+/);
-        if (parts.length < 2) {
-            return message.reply('❌ 사용법: `!계좌추가 [계좌이름] [TAXABLE|RETIREMENT|PENSION|ISA|OTHER]`');
-        }
-        const accountName = parts[1];
-        const typeRaw = (parts[2] || 'OTHER').toUpperCase();
-        const allowed = new Set(['TAXABLE', 'RETIREMENT', 'PENSION', 'ISA', 'OTHER']);
-        const accountType = (allowed.has(typeRaw) ? typeRaw : 'OTHER') as
-            | 'TAXABLE'
-            | 'RETIREMENT'
-            | 'PENSION'
-            | 'ISA'
-            | 'OTHER';
-        try {
-            await createAccount({
-                discordUserId: getDiscordUserId(message.author),
-                accountName,
-                accountType
-            });
-            logger.info('ACCOUNT', 'account applied to portfolio/trade', { accountName, accountType });
-            return message.reply(
-                `✅ 계좌 **${accountName}** (${accountType}) 생성 완료. **${GENERAL_ACCOUNT_NAME}**는 자동 생성되며 미지정 매수 시 해당 계좌에 반영됩니다.`
-            );
-        } catch (e: any) {
-            return message.reply(`❌ 계좌 생성 실패: ${e?.message || String(e)}`);
-        }
-    }
-
-    if (message.content.startsWith('!내계좌')) {
-        const uid = getDiscordUserId(message.author);
-        const { data, error } = await supabase
-            .from('accounts')
-            .select('account_name, account_type, id')
-            .eq('discord_user_id', uid)
-            .order('created_at', { ascending: true });
-        if (error) return message.reply(`❌ 조회 실패: ${error.message}`);
-        if (!data?.length) return message.reply('등록된 계좌가 없습니다. `!계좌추가` 로 추가하세요.');
-        const lines = data.map(a => `- **${a.account_name}** (${a.account_type}) \`${a.id}\``);
-        return message.reply(['**내 계좌 목록**', ...lines].join('\n'));
-    }
-
-    if (message.content.startsWith('!지출추가')) {
-        const parts = message.content.split(' ');
-        if (parts.length < 3) return message.reply("❌ 사용법: `!지출추가 [금액] [카테고리] [설명...]`");
-        const [_, amountStr, category, ...descParts] = parts;
-        const amount = parseNumberStrict(amountStr);
-        if (amount === null) return message.reply("❌ 금액은 숫자로 입력해주세요.");
-
-        const { error } = await supabase.from('expenses').insert({
-            discord_user_id: getDiscordUserId(message.author), amount, category, description: descParts.join(' ')
-        });
-        if (error) {
-            logger.error('DATABASE', 'Supabase insert failure', error);
-            return message.reply(`❌ 등록 실패: ${error.message}`);
-        }
-        return message.reply(`✅ **${category}** 지출 기록 추가 완료!`);
-    }
-
-    if (message.content.startsWith('!현금흐름추가')) {
-        const parts = message.content.split(' ');
-        if (parts.length < 3) {
-            return message.reply(
-                '❌ 사용법: `!현금흐름추가 [유형] [금액] [설명...]` — 유형: SALARY, BONUS, LOAN_IN, LOAN_PRINCIPAL, LOAN_INTEREST, CONSUMPTION, OTHER_IN, OTHER_OUT'
-            );
-        }
-        const [_, typeRaw, amountStr, ...descParts] = parts;
-        const flowType = parseCashflowFlowType(typeRaw);
-        if (!flowType) {
-            return message.reply(
-                '❌ 잘못된 현금흐름 유형입니다. (SALARY, BONUS, LOAN_IN, LOAN_PRINCIPAL, LOAN_INTEREST, CONSUMPTION, OTHER_IN, OTHER_OUT 중 택 1)'
-            );
-        }
-        
-        const amount = parseNumberStrict(amountStr);
-        if (amount === null) return message.reply("❌ 금액은 숫자로 입력해주세요.");
-
-        const { error } = await supabase.from('cashflow').insert({
-            discord_user_id: getDiscordUserId(message.author), flow_type: flowType, amount, description: descParts.join(' '), flow_date: new Date().toISOString()
-        });
-        if (error) {
-            logger.error('DATABASE', 'Supabase insert failure', error);
-            return message.reply(`❌ 등록 실패: ${error.message}`);
-        }
-        return message.reply(`✅ **${flowType}** 현금흐름 추가 완료!`);
-    }
-
-    if (message.content.startsWith('!토론')) {
-        const orch = decideOrchestratorRoute({ messagePrefix: message.content });
-        logOrchestratorDecision(orch, { source: '!토론' });
-        const userQuery = message.content.replace('!토론', '').trim() || '현재 내 상황을 점검해줘.';
-        const isTrend = isTrendQueryCheck(userQuery);
-        const isFinancial = detectFinancialIntent(userQuery);
-
-        const statusText = isTrend
-            ? '📌 **트렌드·주제 분석 중…** (포트폴리오 스냅샷 미사용)'
-            : isFinancial
-                ? '📊 **포트폴리오 기반 재무 분석 토론 중...**'
-                : '📌 **자유 주제 분석 중…** (포트폴리오 스냅샷 미사용)';
-
-        const loadingMsg = await message.reply(statusText);
-        if (isTrend) {
-            await runTrendAnalysis(message.author.id, userQuery, loadingMsg, 'free', undefined);
-        } else if (isFinancial) {
-            await runPortfolioDebate(message.author.id, userQuery, loadingMsg);
-        } else {
-            await runOpenTopicDebate(message.author.id, userQuery, loadingMsg);
-        }
-        await loadingMsg.delete().catch(() => {});
-    }
+client.on(Events.MessageCreate, message => {
+    void handleMessageCreate(message, messageCreateCtx);
 });
 
 const portfolioInteractionDeps = {

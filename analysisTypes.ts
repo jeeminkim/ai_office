@@ -123,3 +123,12 @@ export type UsageTrackingRow = {
   created_at?: string | null;
 };
 
+/** 작업별 모델 라우팅 (`llmProviderService.getModelForTask`) */
+export type LlmTaskType = 'PERSONA_ANALYSIS' | 'CIO_DECISION' | 'SUMMARY' | 'RETRY_LIGHT';
+
+/** Gemini `generateContent` 등 호출부 공통 출력 상한·온도 */
+export type AgentGenCaps = {
+  maxOutputTokens?: number;
+  temperature?: number;
+};
+

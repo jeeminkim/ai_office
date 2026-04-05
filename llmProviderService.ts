@@ -1,6 +1,7 @@
 import { logger } from './logger';
 import type {
   LlmProvider,
+  LlmTaskType,
   OpenAiToGeminiFallbackReason,
   PersonaKey,
   ProviderGenerationResult,
@@ -9,6 +10,8 @@ import type {
 } from './analysisTypes';
 import { generateOpenAiResponse } from './openAiLlmService';
 import { canUseOpenAiThisMonth, estimateOpenAiCost, recordApiUsage } from './usageTrackingService';
+import type { AiExecutionHandle } from './src/discord/aiExecution/aiExecutionHandle';
+import { AiExecutionAbortedError } from './src/discord/aiExecution/aiExecutionAbort';
 
 function fallbackEnabled(): boolean {
   return (process.env.OPENAI_FALLBACK_TO_GEMINI || 'on').toLowerCase() !== 'off';
@@ -91,23 +94,84 @@ export function getPersonaModelConfig(personaKey: PersonaKey): ProviderModelConf
   };
 }
 
+const GEMINI_FLASH = 'gemini-2.5-flash';
+
+/**
+ * 작업 유형별 기본 모델 문자열 (OpenAI 페르소나는 월별 가드 경로에서 사용).
+ * CIO 등 Gemini 전용 경로는 호출부에서 `generateGeminiResponse({ model: getModelForTask(...) })`로 연동.
+ */
+export function getModelForTask(taskType: LlmTaskType, personaKey?: PersonaKey): string {
+  switch (taskType) {
+    case 'PERSONA_ANALYSIS':
+      if (personaKey === 'HINDENBURG') {
+        return process.env.OPENAI_MODEL_PERSONA_ANALYSIS || process.env.OPENAI_MODEL_HINDENBURG || 'gpt-5-mini';
+      }
+      if (personaKey === 'SIMONS') {
+        return process.env.OPENAI_MODEL_PERSONA_ANALYSIS || process.env.OPENAI_MODEL_SIMONS || 'gpt-5-mini';
+      }
+      if (personaKey === 'HOT_TREND') {
+        return process.env.OPENAI_MODEL_SUMMARY || process.env.OPENAI_MODEL_HOT_TREND || 'gpt-5-mini';
+      }
+      if (personaKey === 'THIEL') {
+        return process.env.OPENAI_MODEL_THIEL || 'gpt-5-mini';
+      }
+      return GEMINI_FLASH;
+    case 'CIO_DECISION':
+      return process.env.OPENAI_MODEL_CIO_DECISION || process.env.OPENAI_MODEL_CIO || 'gpt-5-mini';
+    case 'SUMMARY':
+      return process.env.GEMINI_MODEL_SUMMARY || GEMINI_FLASH;
+    case 'RETRY_LIGHT':
+      return process.env.GEMINI_MODEL_RETRY_LIGHT || process.env.GEMINI_MODEL_SUMMARY || GEMINI_FLASH;
+    default:
+      return GEMINI_FLASH;
+  }
+}
+
 export async function generateWithPersonaProvider(params: {
   discordUserId: string;
   personaKey: PersonaKey;
   personaName: string;
   prompt: string;
   fallbackToGemini: () => Promise<ProviderGenerationResult>;
+  /** Discord AI timeout / 취소와 연동 */
+  aiExecution?: AiExecutionHandle | null;
+  taskType?: LlmTaskType;
+  modelOverride?: string;
+  generation?: { maxOutputTokens?: number; temperature?: number };
+  /** 관측성: 병렬 페르소나 슬롯 여부 */
+  parallel_execution_used?: boolean;
+  /** 관측성: 압축 BASE_CONTEXT 사용 여부 */
+  compressed_prompt_used?: boolean;
 }): Promise<ProviderGenerationResult> {
   const traceId = `llm-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
   const config = getPersonaModelConfig(params.personaKey);
+  const ex = params.aiExecution;
+  const openAiModel =
+    params.modelOverride ??
+    (params.taskType && config.provider === 'openai'
+      ? getModelForTask(params.taskType, params.personaKey)
+      : config.model);
+  const mergedGen = (() => {
+    const g = params.generation;
+    if (params.taskType === 'RETRY_LIGHT' && !g) {
+      return { maxOutputTokens: 320, temperature: 0.3 };
+    }
+    return g;
+  })();
+
+  if (ex?.shouldDiscardOutgoing()) {
+    throw new AiExecutionAbortedError();
+  }
   logger.info('LLM_PROVIDER', 'provider selected', {
     personaKey: params.personaKey,
     personaName: params.personaName,
     provider: config.provider,
-    model: config.model
+    model: config.provider === 'openai' ? openAiModel : config.model,
+    taskType: params.taskType ?? null
   });
 
   if (config.provider !== 'openai') {
+    if (ex?.shouldDiscardOutgoing()) throw new AiExecutionAbortedError();
     const r = await params.fallbackToGemini();
     return withGeminiPrimaryMeta(r);
   }
@@ -157,16 +221,21 @@ export async function generateWithPersonaProvider(params: {
   }
 
   try {
+    if (ex?.shouldDiscardOutgoing()) throw new AiExecutionAbortedError();
     const openaiResult = await generateOpenAiResponse({
       prompt: params.prompt,
-      model: config.model,
+      model: openAiModel,
       systemPrompt: personaSystemPrompt(params.personaKey),
       personaName: params.personaName,
-      traceId
+      traceId,
+      abortSignal: ex?.signal,
+      onResponseId: id => ex?.registerOpenAiResponseId(id),
+      maxOutputTokens: mergedGen?.maxOutputTokens,
+      temperature: mergedGen?.temperature
     });
 
     const estimatedCostUsd = estimateOpenAiCost({
-      model: config.model,
+      model: openAiModel,
       inputTokens: openaiResult.usage?.input_tokens,
       outputTokens: openaiResult.usage?.output_tokens
     });
@@ -176,13 +245,24 @@ export async function generateWithPersonaProvider(params: {
       discord_user_id: params.discordUserId,
       persona_name: params.personaName,
       provider: 'openai',
-      model: config.model,
+      model: openAiModel,
       input_tokens: openaiResult.usage?.input_tokens ?? null,
       output_tokens: openaiResult.usage?.output_tokens ?? null,
       estimated_cost_usd: estimatedCostUsd
     });
 
-    return withOpenAiPrimaryMeta(openaiResult);
+    logger.info('AI_PERF', 'llm_openai_complete', {
+      traceId,
+      personaKey: params.personaKey,
+      model_used: openAiModel,
+      parallel_execution_used: params.parallel_execution_used ?? false,
+      compressed_prompt_used: params.compressed_prompt_used ?? false,
+      prompt_token_estimate: Math.ceil(params.prompt.length / 4),
+      response_token_estimate:
+        openaiResult.usage?.output_tokens ?? Math.ceil((openaiResult.text || '').length / 4)
+    });
+
+    return withOpenAiPrimaryMeta({ ...openaiResult, model: openAiModel });
   } catch (e: any) {
     logger.warn('LLM_PROVIDER', 'openai failed', {
       personaKey: params.personaKey,

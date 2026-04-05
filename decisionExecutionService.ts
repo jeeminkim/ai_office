@@ -7,6 +7,7 @@ import {
 } from './src/application/buildRebalancePlanAppService';
 import { getLatestDecisionArtifactForChat } from './src/repositories/decisionArtifactRepository';
 import { generateGeminiResponse } from './geminiLlmService';
+import { getModelForTask } from './llmProviderService';
 
 export type ExecutionKind = 'immediate_sell' | 'staged_sell' | 'hold' | 'cio_followup' | 'clarify';
 
@@ -160,7 +161,12 @@ export async function executeDecisionAfterSelection(params: {
         `선택지 전체: ${params.options.join(' | ')}`,
         '위 선택을 반영한 **구체 실행안·우선순위·리스크**를 한국어로 800자 이내, 불릿 위주로 작성하세요.'
       ].join('\n');
-      const g = await generateGeminiResponse({ model: 'gemini-2.5-flash', prompt });
+      const g = await generateGeminiResponse({
+        model: getModelForTask('SUMMARY'),
+        prompt,
+        maxOutputTokens: 220,
+        temperature: 0.35
+      });
       followUp = `## CIO 후속 분석 (선택 반영)\n\n${g.text || '_(응답 생성에 실패했습니다. 잠시 후 다시 시도해 주세요.)_'}`;
       replyAck = `**선택 완료:** ${params.selectedOption}을(를) 반영한 CIO 후속 분석을 생성합니다.`;
     } else {

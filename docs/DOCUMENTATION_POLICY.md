@@ -16,9 +16,9 @@
    - LLM provider/model 전략 변경
 4. `docs/CHANGELOG.md`는 코드 변경 시 **항상** 갱신한다.
 5. 환경변수 변경 시 `docs/ENVIRONMENT.md`를 반드시 갱신한다.
-6. 테이블/컬럼/관계 변경 시 `docs/DATABASE_SCHEMA.md`를 반드시 갱신한다.
-7. 실행 흐름/모듈 구조 변경 시 `docs/SYSTEM_ARCHITECTURE.md`를 반드시 갱신한다.
-8. 운영 절차 변경 시 `docs/OPERATIONS_RUNBOOK.md`를 반드시 갱신한다.
+6. 테이블/컬럼/관계 변경 시 **`docs/DATABASE.md`** 를 반드시 갱신한다. (구명 `DATABASE_SCHEMA.md`는 리다이렉트만 유지.)
+7. 실행 흐름/모듈 구조 변경 시 **`docs/ARCHITECTURE.md`** 를 반드시 갱신한다. Discord UX만 바뀌면 **`docs/DISCORD_UX.md`**, 분석 파이프라인만 바뀌면 **`docs/ANALYSIS_PIPELINE.md`** 도 함께 검토한다. (구명 `SYSTEM_ARCHITECTURE.md`는 리다이렉트.)
+8. 운영 절차·로그 확인 절차 변경 시 **`docs/OPERATIONS.md`** 를 반드시 갱신한다. 장애 대응 순서·FAQ 성격이면 **`docs/TROUBLESHOOTING.md`** 도 갱신한다. (구명 `OPERATIONS_RUNBOOK.md`는 리다이렉트.)
 9. 테스트 절차 변경 시 `docs/TEST_CHECKLIST.md`를 반드시 갱신한다.
 10. 로드맵 변경 시 `docs/ROADMAP.md`를 반드시 갱신한다.
 
@@ -38,21 +38,23 @@
 
 ## Self-check / npm script 동기화
 - `package.json`의 `check:*` 스크립트 추가·변경·삭제 시 반드시 함께 갱신한다.
-  - `README.md` (Self-check / 검증 명령 섹션)
+  - `docs/OPERATIONS.md` (배포 전 self-check·`node dist/*_self_check.js` 목록 — 전문)
+  - `README.md` (필요 시 한 줄로 “자세한 명령은 OPERATIONS.md”만 보강)
   - `docs/TEST_CHECKLIST.md` (자동 점검 목록)
-  - `docs/OPERATIONS_RUNBOOK.md` (배포 전 필수/확장 구분에 해당하면)
+  - `docs/OPERATIONS.md` (배포 전 필수/확장 구분에 해당하면)
   - `docs/ENVIRONMENT.md` (새 env가 필요하면)
   - `docs/CHANGELOG.md`
-  - Phase 2 decision 관련 시: `docs/SYSTEM_ARCHITECTURE.md`, `docs/DATABASE_SCHEMA.md`(테이블 추가), `docs/ROADMAP.md`
-  - Phase 2 **SQL hardening** 추가 시: `docs/sql/append_phase2_decision_tables_hardening.sql`, `DATABASE_SCHEMA.md`, `OPERATIONS_RUNBOOK.md`, `TEST_CHECKLIST.md`
+  - Phase 2 decision 관련 시: `docs/ARCHITECTURE.md`, `docs/ANALYSIS_PIPELINE.md`, `docs/DATABASE.md`(테이블 추가), `docs/ROADMAP.md`
+  - Phase 2 **SQL hardening** 추가 시: `docs/sql/append_phase2_decision_tables_hardening.sql`, `docs/DATABASE.md`, `docs/OPERATIONS.md`, `TEST_CHECKLIST.md`
 
 ## 최소 문서 갱신 매트릭스
-- DB 타입 계약(`src/types/dbSchemaContract.ts`) 또는 스키마 점검 스크립트 변경 -> `DATABASE_SCHEMA.md`, `SYSTEM_ARCHITECTURE.md`(확인 필요 절), `CHANGELOG.md`, `TEST_CHECKLIST.md`(자동 점검 명령 추가 시)
-- Phase 1 구조/self-check 스크립트 추가·변경 -> `SYSTEM_ARCHITECTURE.md`, `TEST_CHECKLIST.md`, `CHANGELOG.md`, `README.md`, `OPERATIONS_RUNBOOK.md`(필수 점검에 포함 시)
-- provider 정책 변경 -> `SYSTEM_ARCHITECTURE.md`, `ENVIRONMENT.md`, `CHANGELOG.md`
-- quote/valuation 변경 -> `SYSTEM_ARCHITECTURE.md`, `OPERATIONS_RUNBOOK.md`, `TEST_CHECKLIST.md`, `CHANGELOG.md`
-- 신규 테이블/컬럼 -> `DATABASE_SCHEMA.md`, `CHANGELOG.md`
-- 운영 명령/절차 변경 -> `OPERATIONS_RUNBOOK.md`, `README.md`(필요 시), `CHANGELOG.md`
+- DB 타입 계약(`src/types/dbSchemaContract.ts`) 또는 스키마 점검 스크립트 변경 -> `docs/DATABASE.md`, `docs/ARCHITECTURE.md`(확인 필요 절), `CHANGELOG.md`, `TEST_CHECKLIST.md`(자동 점검 명령 추가 시)
+- Phase 1 구조/self-check 스크립트 추가·변경 -> `docs/ARCHITECTURE.md`, `TEST_CHECKLIST.md`, `CHANGELOG.md`, `docs/OPERATIONS.md`, `README.md`(요약 필요 시만)
+- provider 정책 변경 -> `docs/ARCHITECTURE.md`, `docs/ANALYSIS_PIPELINE.md`, `ENVIRONMENT.md`, `CHANGELOG.md`
+- quote/valuation 변경 -> `docs/ARCHITECTURE.md`, `docs/ANALYSIS_PIPELINE.md`, `docs/OPERATIONS.md`, `docs/TROUBLESHOOTING.md`, `TEST_CHECKLIST.md`, `CHANGELOG.md`
+- 신규 테이블/컬럼 -> `docs/DATABASE.md`, `CHANGELOG.md`
+- 운영 명령/절차 변경 -> `docs/OPERATIONS.md`, `README.md`(한 줄 요약 필요 시만), `CHANGELOG.md`
+- Discord 버튼·피드백·follow-up UX만 변경 -> `docs/DISCORD_UX.md`, `CHANGELOG.md`
 
 ## 리뷰/승인 기준
 - 리뷰어는 코드 변경과 문서 변경의 일치 여부를 함께 확인한다.

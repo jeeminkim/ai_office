@@ -20,6 +20,10 @@
   - OpenAI 호출 키 (없으면 대상 페르소나는 Gemini fallback)
 - `OPENAI_MODEL_HINDENBURG` (default: `gpt-5-mini`)
 - `OPENAI_MODEL_SIMONS` (default: `gpt-5-mini`)
+- `OPENAI_MODEL_PERSONA_ANALYSIS` (optional: Hindenburg/Simons 등 **페르소나 분석** 작업에 공통 지정 시 위보다 우선)
+- `OPENAI_MODEL_CIO_DECISION` / `OPENAI_MODEL_CIO` (optional: OpenAI 기반 CIO 경로 확장 시; 현재 CIO follow-up 일부는 Gemini `SUMMARY`)
+- `GEMINI_MODEL_SUMMARY` (optional: 트렌드·요약·저비용 Gemini 기본 모델 문자열, default: 코드 내 `gemini-2.5-flash`)
+- `GEMINI_MODEL_RETRY_LIGHT` (optional: timeout 재시도·짧은 요약 경로)
 - `OPENAI_MODEL_THIEL` (코드에서 참조, `.env.example` 반영 필요)
 - `OPENAI_MODEL_HOT_TREND` (코드에서 참조, `.env.example` 반영 필요)
 - `OPENAI_MONTHLY_MAX_CALLS` (default: `120`)
@@ -49,6 +53,10 @@ GEMINI_API_KEY=
 OPENAI_API_KEY=
 OPENAI_MODEL_HINDENBURG=gpt-5-mini
 OPENAI_MODEL_SIMONS=gpt-5-mini
+# OPENAI_MODEL_PERSONA_ANALYSIS=
+# OPENAI_MODEL_CIO_DECISION=
+# GEMINI_MODEL_SUMMARY=gemini-2.5-flash
+# GEMINI_MODEL_RETRY_LIGHT=gemini-2.5-flash
 OPENAI_MODEL_THIEL=gpt-5-mini
 OPENAI_MODEL_HOT_TREND=gpt-5-mini
 OPENAI_MONTHLY_MAX_CALLS=120

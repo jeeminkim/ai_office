@@ -1,5 +1,6 @@
 import { logger } from './logger';
 import type { ProviderGenerationResult } from './analysisTypes';
+import { AiExecutionAbortedError } from './src/discord/aiExecution/aiExecutionAbort';
 
 export async function generateOpenAiResponse(params: {
   prompt: string;
@@ -7,6 +8,11 @@ export async function generateOpenAiResponse(params: {
   systemPrompt?: string;
   personaName?: string;
   traceId?: string;
+  /** Responses API 응답 id — timeout 시 cancel 시도용 */
+  onResponseId?: (id: string) => void;
+  abortSignal?: AbortSignal;
+  maxOutputTokens?: number;
+  temperature?: number;
 }): Promise<ProviderGenerationResult> {
   const apiKey = process.env.OPENAI_API_KEY || '';
   const traceId = params.traceId || `openai-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
@@ -102,12 +108,19 @@ export async function generateOpenAiResponse(params: {
     promptLength: String(params.prompt || '').length,
     systemPromptLength: String(params.systemPrompt || '').length
   });
+  if (params.abortSignal?.aborted) {
+    throw new AiExecutionAbortedError('aborted before openai request');
+  }
+  const createBody: Record<string, unknown> = {
+    model: params.model,
+    input
+  };
+  if (params.maxOutputTokens != null) createBody.max_output_tokens = params.maxOutputTokens;
+  if (params.temperature != null) createBody.temperature = params.temperature;
+
   let response: any;
   try {
-    response = await client.responses.create({
-      model: params.model,
-      input
-    });
+    response = await client.responses.create(createBody as any);
   } catch (e: any) {
     logger.error('OPENAI', 'openai request failed', {
       traceId,
@@ -118,6 +131,19 @@ export async function generateOpenAiResponse(params: {
       reason: e?.message || String(e)
     });
     throw e;
+  }
+
+  const rid = typeof (response as any)?.id === 'string' ? (response as any).id : null;
+  if (rid) {
+    try {
+      params.onResponseId?.(rid);
+    } catch {
+      // ignore registry errors
+    }
+  }
+
+  if (params.abortSignal?.aborted) {
+    throw new AiExecutionAbortedError('aborted after openai response received');
   }
 
   const text = String((response as any).output_text || '').trim();

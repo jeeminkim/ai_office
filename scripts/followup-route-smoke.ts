@@ -8,3 +8,4 @@ const { buttonRoutes, stringSelectRoutes, modalRoutes } = buildInteractionRoutes
 const all = [...buttonRoutes, ...stringSelectRoutes, ...modalRoutes];
 const follow = all.filter((r) => /followup|follow-up/i.test(r.name) || r.name.includes('followup'));
 console.log('[followup-route-smoke] follow-up related routes:', follow.map((r) => r.name));
+process.exit(0);

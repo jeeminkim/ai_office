@@ -10,6 +10,9 @@ export type UpdateHealthFn = typeof updateHealth;
 
 export type UserRiskMode = 'SAFE' | 'BALANCED' | 'AGGRESSIVE';
 
+export type PortfolioDebateFastMode = 'none' | 'light_summary' | 'short_summary';
+export type TrendAnalysisFastMode = 'none' | 'short';
+
 /** runPortfolioDebate / runOpenTopic / runTrend 등 index에 남은 오케스트레이션 (자동 주문 없음). */
 export type InteractionRuntimeBundle = {
   runTrendAnalysis: (
@@ -17,10 +20,21 @@ export type InteractionRuntimeBundle = {
     userQuery: string,
     sourceInteraction: any,
     topic: TrendTopicKind | 'free',
-    triggerCustomId?: string
+    triggerCustomId?: string,
+    opts?: { fastMode?: TrendAnalysisFastMode }
   ) => Promise<void>;
-  runPortfolioDebate: (userId: string, userQuery: string, sourceInteraction: any) => Promise<void>;
-  runOpenTopicDebate: (userId: string, userQuery: string, sourceInteraction: any) => Promise<void>;
+  runPortfolioDebate: (
+    userId: string,
+    userQuery: string,
+    sourceInteraction: any,
+    opts?: { fastMode?: PortfolioDebateFastMode }
+  ) => Promise<void>;
+  runOpenTopicDebate: (
+    userId: string,
+    userQuery: string,
+    sourceInteraction: any,
+    opts?: { fastMode?: PortfolioDebateFastMode }
+  ) => Promise<void>;
   runDataCenterAction: (
     userId: string,
     action: 'daily_log_analysis' | 'system_improvement_suggestion',

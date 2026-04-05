@@ -35,6 +35,39 @@
 - ...
 ```
 
+## 2026-03-28
+
+### Added
+- **AI 분석 5분 타임아웃·재시도**: `src/discord/aiExecution/*` — `runUserVisibleAiExecution` 래핑(`index.ts` 포트폴리오·트렌드·오픈 토픽), `AiExecutionHandle`·`AbortController`·OpenAI Responses **cancel best-effort**·`broadcastAgentResponse` 폐기 가드·`timeoutRoutes.ts` 버튼(경량/요약/메인 메뉴). in-memory 재시도 payload(`aiExecutionPolicy.ts`). **자동 매매 없음**.
+- **AI 성능·비용 경로(압축·병렬·모델 분리)**: `src/application/promptCompressionPortfolio.ts` — 포트폴리오/오픈토픽 **BASE·PERSONA·TASK** 분리·압축, `compressPersonaOutputsForCio`. 포트폴리오 **Ray ∥ Hindenburg** 병렬(`Promise.allSettled`), CIO 입력 압축. `analysisTypes` `LlmTaskType`·`AgentGenCaps`; `llmProviderService.getModelForTask`·OpenAI/Gemini **max_tokens·temperature**; `agents.ts`·`geminiLlmService`·`openAiLlmService` 생성 옵션. 관측 **`AI_PERF`**. `index.ts` **조기 `broadcastAgentResponse`**(`onPersonaSegmentReady` / `onPersonaReady`) + 최종 루프 중복 스킵. `decisionExecutionService` CIO follow-up Gemini에 동일 요약 모델·상한. **timeout/cancel·위원회 구조 유지**.
+- **조기 브로드캐스트 후 피드백 분리**: `registerPendingFeedbackFollowup` → `chat_history` 확정 후 `sendFeedbackFollowupAttachMessage`(`discordBroadcastService.ts`)로 봇 메시지에 기존 `feedback:save:*` 행 부착. 로그 `FEEDBACK_FOLLOWUP_ATTACH_PENDING` / `ATTACHED` / `SKIPPED`, 중복 방지.
+- **`AI_PERF` 실행 요약**: `first_visible_latency_ms`, `execution_summary`(`total_execution_time_ms`, `prompt_build_time_ms`, `persona_parallel_wall_time_ms`, `cio_stage_time_ms`, `compressed_prompt_mode`, `retry_mode_used`, `partial_fallback_used`) — `aiExecutionHandle.ts`·앱 서비스.
+- **압축 모드 구분**: `standard_compressed`(기본) vs `aggressive_compressed`(재시도 경량·요약·FAST 트렌드 등); `AI_PERF`에 기록.
+
+### Changed
+- **`InteractionRuntimeBundle`**: `runPortfolioDebate` / `runOpenTopicDebate` / `runTrendAnalysis`에 선택 인자 `opts.fastMode` (timeout 재시도·경량 경로).
+- **`runTrendAnalysisAppService`**: `execution`·`fastMode`·`assertActiveExecution` 복구 및 정합.
+- **`scripts/interaction-smoke-check.ts`**: `timeoutRoutes.ts` 파일 존재 기대 목록에 추가.
+- **AI timeout 고도화(2차)**: `FIRST_VISIBLE_TIMEOUT_MS`(90s) + 전체 5분, `markFirstResponseSent`·조기 타이머 해제, 타임아웃 시 **partial 요약**(`aiExecutionHelpers.formatPartialFallbackDiscordBody`, `collectPartialResult` in app services), **`timeout_retry_snapshots` DB** + 실패 시 메모리 폴백, 버튼 ID를 UUID 스냅샷 기준으로 통일(레거시 hex 호환 유지). `AiExecutionHandle`에 `expired`·`timeoutPhase`·`partialSegments`·`augmentRetryPayload`.
+
+### Docs
+- `README.md`, `docs/SYSTEM_ARCHITECTURE.md`, `docs/OPERATIONS_RUNBOOK.md`, `docs/TEST_CHECKLIST.md`, `docs/DATABASE_SCHEMA.md`, `docs/CHANGELOG.md` — 2단계 타임아웃·partial·스냅샷·로그 반영.
+- 동일 날짜 후속: `README.md`, `SYSTEM_ARCHITECTURE.md`, `OPERATIONS_RUNBOOK.md`, `TEST_CHECKLIST.md`, `ENVIRONMENT.md`, `.env.example` — 프롬프트 압축·페르소나 병렬·`getModelForTask`·`AI_PERF`·조기 브로드캐스트 트레이드오프.
+- 동일 날짜 후속(피드백 follow-up·`AI_PERF`·압축 모드·Drucker/CIO 선계산): `README.md`, `docs/SYSTEM_ARCHITECTURE.md`, `docs/OPERATIONS_RUNBOOK.md`, `docs/TEST_CHECKLIST.md`.
+- **문서 구조 정리(후속)**: README 입구 문서화 축소; `docs/ARCHITECTURE.md`, `docs/OPERATIONS.md`, `docs/DATABASE.md`, `docs/DISCORD_UX.md`, `docs/ANALYSIS_PIPELINE.md`, `docs/TROUBLESHOOTING.md` 신설·분리. `SYSTEM_ARCHITECTURE.md`·`OPERATIONS_RUNBOOK.md`·`DATABASE_SCHEMA.md`는 리다이렉트 스텁. `DOCUMENTATION_POLICY.md` 정식 파일명 반영.
+
+## 2026-03-29
+
+### Refactor
+- **Interaction routes**: `buildInteractionRoutes.ts`는 **조립 전용**. 도메인별 `src/discord/handlers/interactionCreate/routes/*.ts`(패널·데이터센터·포트폴리오·금융 모달·설정·decision/feedback/follow-up 등). `InteractionRoute` / `dispatchRoutesInOrder` / 등록 순서·핸들 로직은 이전 단일 파일과 동일하게 이전.
+- **index.ts 슬림화**: `Events.MessageCreate` → `handleMessageCreate` + `MessageCreateContext` (`src/discord/handlers/messageCreate.ts`). 에이전트 브로드캐스트·컴포넌트 행 우선순위·post-navigation → `src/discord/services/discordBroadcastService.ts` (`discordBroadcastDeps` 주입). `domain/` 신설 및 루트 `*Service.ts` 대이동 없음.
+
+### Changed
+- **스모크**: `scripts/interaction-smoke-check.ts`·`scripts/followup-route-smoke.ts` 끝에 `process.exit(0)` 추가(transitive import 시 Node가 종료되지 않는 환경 대비). interaction 스모크에서 기대 `routes/*.ts`·`messageCreate.ts`·`discordBroadcastService.ts` 경로 존재 확인.
+
+### Docs
+- `README.md`, `docs/SYSTEM_ARCHITECTURE.md`, `docs/OPERATIONS_RUNBOOK.md`, `docs/TEST_CHECKLIST.md`, `docs/CHANGELOG.md` — 위 구조 반영.
+
 ## 2026-04-02
 
 ### Refactor
