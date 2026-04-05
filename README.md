@@ -8,7 +8,7 @@ Discord·Node.js·TypeScript·Supabase 기반 투자·포트폴리오 보조 봇
 - Gemini / OpenAI 혼합 LLM, 페르소나별 라우팅·예산 가드
 - 분석 결과의 claim 추출·저장, 사용자 피드백 및 Phase 2 위원회 의사결정 산출물
 - 조기 브로드캐스트 본문과 분리된 **피드백 버튼 follow-up**(동일 `feedback:save:*` 패턴, 봇 메시지)
-- 운영 로그 **`AI_PERF`**: 첫 응답까지 `first_visible_latency_ms`, 완료 시 `execution_summary`(실행 시간·프롬프트 조립·병렬·CIO 구간, `standard_compressed` / `aggressive_compressed` 등)
+- 운영 로그 **`AI_PERF`**: 첫 응답까지 `first_visible_latency_ms`, 완료 시 `execution_summary`(실행 시간·프롬프트 조립·병렬·CIO 구간, `standard_compressed` / `aggressive_compressed` 등); 포트폴리오 위원 **`QUALITY_*`**, OpenAI **`OPENAI_CAPABILITY_APPLIED`** 등은 **docs/OPERATIONS.md** §3.3
 - Phase 2.5 그림자 리밸 실행안(증권사 주문 API 없음; 체결은 사용자 전제)
 - 로컬 Control Panel(실행 상태·기동/중지)과 일별 운영 로그
 

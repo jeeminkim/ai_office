@@ -25,6 +25,8 @@ export type ProviderRuntimeContext = {
   discordUserId: string;
   personaKey: PersonaKey;
   personaName: string;
+  /** OpenAI capability·호환 로그용 */
+  analysisType?: string;
 };
 
 export type ProviderSelectionPolicy = {
@@ -53,6 +55,7 @@ export async function executeWithProvider(params: {
     personaKey: params.runtime.personaKey,
     personaName: params.runtime.personaName,
     prompt: params.prompt,
+    analysisType: params.runtime.analysisType,
     fallbackToGemini: params.fallbackToGemini
   });
   const meta = result.generation_meta;

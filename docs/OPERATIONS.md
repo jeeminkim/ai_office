@@ -87,6 +87,13 @@ pm2 restart ai-office
 - **구현 위치**: `src/discord/aiExecution/aiExecutionHandle.ts`(`logExecutionPerfSummary`), `runPortfolioDebateAppService.ts`, `runOpenTopicDebateAppService.ts`, `runTrendAnalysisAppService.ts` / `trendAnalysis.ts`, `promptCompressionPortfolio.ts`, `llmProviderService.getModelForTask`.
 - **Discord·피드백**: 조기 본문은 피드백 행 없이 나갈 수 있음 → `chat_history` 등 준비 후 **`sendFeedbackFollowupAttachMessage`**로 **추가 채널 메시지**에 동일 `feedback:save:*` 행. 로그: `FEEDBACK_FOLLOWUP_ATTACH_PENDING`, `FEEDBACK_FOLLOWUP_ATTACHED`, `FEEDBACK_FOLLOWUP_SKIPPED`(중복·채널 없음 등). 최종 루프에서는 동일 페르소나 **본문** 이중 전송 방지.
 
+### 3.3 포트폴리오 품질 가드·OpenAI 호환 (`QUALITY` / `OPENAI`)
+
+- **파일**: `portfolioPersonaQualityGuard.ts`, `openAiModelCapabilities.ts`, `openAiLlmService.ts`, `llmProviderService.ts`.
+- **품질(scope `QUALITY` → 카테고리 `llm`)**: `QUALITY_FLOOR_PASSED` \| `QUALITY_FLOOR_FAILED` \| `QUALITY_REGENERATE_ATTEMPT` \| `QUALITY_REGENERATE_RECOVERED` \| `QUALITY_REGENERATE_EXHAUSTED`. 필드 예: `personaKey`, `analysisType`, `runMode`(`full`|`light`|`retry_summary`|`short_summary`), `executionId`, `responseLength`, `sentenceCount`, `evidenceMarkerCount`, `hasDecisionToken`, `attemptNo`, `pass`.
+- **OpenAI(scope `OPENAI`)**: `OPENAI_CAPABILITY_APPLIED`(모델별 지원 반영 결과), `OPENAI_UNSUPPORTED_PARAM_REMOVED`(사전 제거된 키), `OPENAI_RETRY_WITH_COMPAT_PAYLOAD`(400 계열 파라미터 거부 시 1회 재시도), `OPENAI_COMPAT_RETRY_SUCCEEDED` \| `OPENAI_COMPAT_RETRY_FAILED`. 필드 예: `model`, `personaKey`, `analysisType`, `removedParams`, `originalParams`(키 목록), `preRemovedParams`.
+- **순서 요약**: capability 사전 적용 → (실패 시) compat 1회 → 그다음 `LLM_PROVIDER`에서 Gemini fallback(기존).
+
 ## 4. 장애 대응 기본 절차
 1. 장애 범주 분류
    - Discord 응답 지연/실패

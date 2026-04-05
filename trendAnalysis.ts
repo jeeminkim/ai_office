@@ -130,6 +130,7 @@ export async function generateTrendSpecialistResponseWithProvider(
         prompt: contents,
         aiExecution: ex ?? undefined,
         taskType: 'PERSONA_ANALYSIS',
+        analysisType: `trend_${topic}`,
         generation: { maxOutputTokens: options?.fastShort ? 320 : 450, temperature: 0.35 },
         compressed_prompt_used: true,
         fallbackToGemini: async () => {

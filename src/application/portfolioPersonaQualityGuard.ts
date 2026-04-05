@@ -1,6 +1,12 @@
 import type { PersonaKey } from '../../analysisTypes';
+import { logger } from '../../logger';
 
 const COMMITTEE_KEYS = new Set<PersonaKey>(['RAY', 'HINDENBURG', 'SIMONS', 'DRUCKER', 'CIO']);
+
+/** full / fast 공통: 최대 호출 횟수(초기 1 + 재생성 2) */
+export const PORTFOLIO_QUALITY_MAX_ATTEMPTS = 3;
+
+export type PortfolioQualityRunMode = 'full' | 'light' | 'retry_summary' | 'short_summary';
 
 /** 모델 원문 기준(후처리 전) 문장 수 추정 */
 export function countSentencesLoose(text: string): number {
@@ -44,6 +50,18 @@ export function portfolioPersonaMeetsQualityFloor(personaKey: PersonaKey, rawTex
   return true;
 }
 
+export function evaluatePortfolioPersonaQualityMetrics(personaKey: PersonaKey, rawText: string) {
+  const t = String(rawText || '').trim();
+  const pass = portfolioPersonaMeetsQualityFloor(personaKey, t);
+  return {
+    pass,
+    responseLength: t.length,
+    sentenceCount: countSentencesLoose(t),
+    evidenceMarkerCount: countEvidenceMarkers(t),
+    hasDecisionToken: personaKey === 'CIO' ? cioHasVerdictToken(t) : hasJudgmentOrDirection(t)
+  };
+}
+
 export function buildPortfolioQualityRetryAppend(personaKey: PersonaKey, attemptIndex: number): string {
   const n = attemptIndex + 1;
   const common = `\n\n[QUALITY_RETRY_${n}]\n이전 출력이 분석 구조·근거 기준에 미달했습니다. **반드시** 아래를 만족해 다시 작성하세요.\n- 최소 **4문장** 이상.\n- **근거 2개 이상**(수치·비중·스냅샷·시그널 등 구체적으로).\n- **판단 또는 방향성**을 명시.\n추상적 한 줄(예: "리스크 있음"만)은 금지.\n`;
@@ -57,4 +75,56 @@ export function buildPortfolioQualityRetryAppend(personaKey: PersonaKey, attempt
   };
 
   return byKey[personaKey] || common;
+}
+
+/**
+ * 포트폴리오 금융 위원 공통: normalize 이전 원문 기준 품질 판정 + 최대 PORTFOLIO_QUALITY_MAX_ATTEMPTS회 호출.
+ */
+export async function runPortfolioPersonaWithQualityRetry<T>(params: {
+  personaKey: PersonaKey;
+  basePrompt: string;
+  maxAttempts?: number;
+  invoke: (fullPrompt: string) => Promise<T>;
+  getText: (result: T) => string;
+  analysisType: string;
+  runMode: PortfolioQualityRunMode;
+  executionId?: string | null;
+}): Promise<T> {
+  const max = params.maxAttempts ?? PORTFOLIO_QUALITY_MAX_ATTEMPTS;
+  const baseLog = {
+    personaKey: params.personaKey,
+    analysisType: params.analysisType,
+    runMode: params.runMode,
+    executionId: params.executionId ?? null
+  };
+
+  let last = await params.invoke(params.basePrompt);
+  let raw = params.getText(last);
+  let metrics = evaluatePortfolioPersonaQualityMetrics(params.personaKey, raw);
+  if (metrics.pass) {
+    logger.info('QUALITY', 'QUALITY_FLOOR_PASSED', { ...baseLog, attemptNo: 1, ...metrics });
+    return last;
+  }
+  logger.warn('QUALITY', 'QUALITY_FLOOR_FAILED', { ...baseLog, attemptNo: 1, ...metrics });
+
+  for (let a = 1; a < max; a++) {
+    const attemptNo = a + 1;
+    logger.info('QUALITY', 'QUALITY_REGENERATE_ATTEMPT', { ...baseLog, attemptNo });
+    const prompt = `${params.basePrompt}${buildPortfolioQualityRetryAppend(params.personaKey, a - 1)}`;
+    last = await params.invoke(prompt);
+    raw = params.getText(last);
+    metrics = evaluatePortfolioPersonaQualityMetrics(params.personaKey, raw);
+    if (metrics.pass) {
+      logger.info('QUALITY', 'QUALITY_REGENERATE_RECOVERED', { ...baseLog, attemptNo, ...metrics });
+      return last;
+    }
+    logger.warn('QUALITY', 'QUALITY_FLOOR_FAILED', { ...baseLog, attemptNo, ...metrics });
+  }
+
+  logger.warn('QUALITY', 'QUALITY_REGENERATE_EXHAUSTED', {
+    ...baseLog,
+    attemptNo: max,
+    ...metrics
+  });
+  return last;
 }

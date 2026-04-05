@@ -28,7 +28,7 @@ export function resolveLogCategory(scope: string): string {
   if (s === 'DB' || s === 'SNAPSHOT' || s === 'CLAIMS' || s === 'MEMORY' || s === 'TRACE') return 'db';
   if (s === 'PORTFOLIO' || s === 'ACCOUNT') return 'portfolio';
   if (s === 'BOOT' || s === 'ENV') return 'boot';
-  if (s === 'LLM_PROVIDER' || s === 'GEMINI') return 'llm';
+  if (s === 'LLM_PROVIDER' || s === 'GEMINI' || s === 'QUALITY') return 'llm';
   return 'runtime';
 }
 

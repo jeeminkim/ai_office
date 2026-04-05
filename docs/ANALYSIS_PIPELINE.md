@@ -5,10 +5,12 @@
 ## 페르소나·provider
 
 - 중앙 호출: `generateWithPersonaProvider` / `llmProviderService.getModelForTask` 등. OpenAI 우선 페르소나(코드 기준): Hindenburg, Simons, Thiel(데이터센터), Hot Trend 등 — 나머지는 기본 Gemini.
+- **OpenAI 파라미터 capability**: `openAiModelCapabilities.ts` — 예: `gpt-5-mini`는 Responses API에서 **temperature 미지원**이 일반적이므로 **전송 전 제외**(`OPENAI_CAPABILITY_APPLIED`, `OPENAI_UNSUPPORTED_PARAM_REMOVED`). 여전히 400·unsupported parameter면 **1회 compat 재시도**(temperature·max_output_tokens 제거한 최소 body) 후, 그다음 **`LLM_PROVIDER` Gemini fallback**(`OPENAI_COMPAT_RETRY_*` 로그). 포트폴리오·트렌드(`trend_*`)·오픈 토픽·데이터 센터 호출 모두 동일 `generateOpenAiResponse` 경로.
 - 예산 초과·오류 시 `OPENAI_FALLBACK_TO_GEMINI` 등으로 Gemini fallback.
 - 프롬프트 압축: `promptCompressionPortfolio.ts` — 기본 **`standard_compressed`**, 재시도 경량·짧은 요약·FAST 트렌드 등은 **`aggressive_compressed`**.
 - **그룹 분리**: `personaRoutePolicy.ts` — 금융 위원회(FINANCIAL) vs 트렌드·K-culture(TREND). 교차 경로에서 페르소나 선택은 하드 차단.
 - **포트폴리오 위원 구성**: `personaWeightService` + `personaSignalsRepository` + `committeeCompositionService` — 가중치·회피·메모리·**최근 피드백/클레임 피드백(얇은 클램프)** 반영. `runMode`별로 **`full`** / 경량 **`light`** / 타임아웃 재시도 **`retry_summary`** / CIO만 **`short`**. 생략 위원 플레이스홀더는 **압축·trace용**; claim 추출·저장 및 피드백 매핑에서는 스킵. 로그: `PERSONA_WEIGHT_APPLIED`, `COMMITTEE_COMPOSITION_BUILT`, `CLAIM_EXTRACTION_PLACEHOLDER_SKIPPED`, `FEEDBACK_MAPPING_PLACEHOLDER_SKIPPED`.
+- **포트폴리오 위원 응답 품질( full = fast 동일 원칙 )**: `src/application/portfolioPersonaQualityGuard.ts` — Ray·Hindenburg·Simons·Drucker·CIO에 대해 **최소 문장·근거·판단**(CIO는 GO/HOLD/REDUCE/EXIT 등 verdict) 미달 시 **동일 프롬프트에 `[QUALITY_RETRY_n]` 부가 후 최대 3회** 재호출(`runPortfolioPersonaWithQualityRetry`). full 경로 프롬프트는 fast와 맞추기 위해 **역할별 `[REASONING_STRUCTURE]` 번들**(`buildPortfolioFastPersonaPromptBundle` 등)을 사용한다. 운영 로그는 **`QUALITY`** scope(**`logs/llm/llm.log_*`**에 라우팅) — **docs/OPERATIONS.md** §3.3.
 
 ## 포트폴리오 토론 흐름
 

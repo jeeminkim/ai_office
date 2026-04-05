@@ -314,6 +314,7 @@ export async function runOpenTopicDebateAppService(params: {
           prompt: personaQuery,
           aiExecution: ex ?? undefined,
           taskType: 'PERSONA_ANALYSIS',
+          analysisType: resolvedAnalysisType,
           generation: { maxOutputTokens: 420, temperature: 0.35 },
           parallel_execution_used: selected.length > 1,
           compressed_prompt_used: true,

@@ -49,11 +49,15 @@
 ## 2026-03-28
 
 ### Added
+- **포트폴리오 품질 가드 full 공통**: `runPortfolioPersonaWithQualityRetry` + `QUALITY_*` 로그(`portfolioPersonaQualityGuard.ts`, `runPortfolioDebateAppService.ts`) — **full·light·retry·short 동일 floor**, 원문 기준·최대 3회 재생성.
+- **OpenAI 모델 capability**: `openAiModelCapabilities.ts` + `generateOpenAiResponse` 사전 파라미터 제거·400 시 1회 compat 재시도 + `OPENAI_*` 관측 로그; `generateWithPersonaProvider.analysisType`·`providerPolicy`·트렌드/오픈 토픽/데이터센터 연동.
 - **위원 `runMode`·경량/재시도 통합**: `committeeCompositionService`에 `light`·`retry_summary`·`short`; 포트폴리오 `light_summary`·`retry_summary`도 `personaWeightService`+`loadPersonaWeightSignalHints`·동일 금융 패밀리(트렌드 페르소나 비개입). 타임아웃 포트폴리오 「요약만 다시」→ `retry_summary`(`timeoutRoutes.ts`). 로그 `COMMITTEE_COMPOSITION_BUILT`·`PERSONA_WEIGHT_APPLIED` 필드 보강(`selectedPersonas`·`recentFeedbackSummary` 등).
 - **오픈 토픽 모호 UX**: `OPEN_TOPIC_AMBIGUOUS_DETECTED` / `OPEN_TOPIC_VIEW_SELECTED`, `followup_snapshots`(`open_topic_ambiguous_view`, `chat_history_ref` `otamb:*`), `runOpenTopicDebate` `forcedOpenTopicView`(`index.ts`, `followupHandlers.ts`, `runOpenTopicDebateAppService.ts`).
 - **Placeholder 격리**: 위원 생략 플레이스홀더는 `analysis_claims`/claim 매핑/`persona_memory` 집계에서 제외, trace·실행 요약은 허용. `CLAIM_EXTRACTION_PLACEHOLDER_SKIPPED`, `FEEDBACK_MAPPING_PLACEHOLDER_SKIPPED`(`analysisPipelineService.ts`, `feedbackIngestionService.ts`, `personaMemoryService.ts`).
 
 ### Changed
+- **포트폴리오 full 프롬프트**: 금융 위원 TASK를 fast와 동일 **구조 번들**(`buildPortfolioFastPersonaPromptBundle`·CIO `buildPersonaReasoningStructureBlock`)로 정렬; Drucker 프리앰블에서 `persona_brevity` 제거.
+- **로거**: `QUALITY` → `logs/llm` (`logger.ts`).
 - **가중치 신호**: 최근 10건 `analysis_feedback_history` + 30일 `claim_feedback`→`analysis_claims` 매핑으로 얇은 보정(클램프, 리스크 좌석 하한 유지; `personaSignalsRepository.ts`).
 
 ### Fixed
@@ -85,6 +89,7 @@
 - **문서 구조 정리(후속)**: README 입구 문서화 축소; `docs/ARCHITECTURE.md`, `docs/OPERATIONS.md`, `docs/DATABASE.md`, `docs/DISCORD_UX.md`, `docs/ANALYSIS_PIPELINE.md`, `docs/TROUBLESHOOTING.md` 신설·분리. `SYSTEM_ARCHITECTURE.md`·`OPERATIONS_RUNBOOK.md`·`DATABASE_SCHEMA.md`는 리다이렉트 스텁. `DOCUMENTATION_POLICY.md` 정식 파일명 반영.
 - **성능·피드백 UX 문서 정렬**: README, `docs/ANALYSIS_PIPELINE.md`, 정본(`ARCHITECTURE`·`DISCORD_UX`·`OPERATIONS`) 교차 참고에 조기 브로드캐스트 피드백 follow-up, `AI_PERF`·`first_visible_latency_ms`, 압축 모드 안내.
 - **라우트 락·페르소나·`!메뉴`**: `docs/DISCORD_UX.md`, `docs/ARCHITECTURE.md`, `docs/OPERATIONS.md` — 신규 메시지 메뉴, `ROUTE_*`·`PERSONA_SELECTION_POLICY_APPLIED`·`MENU_RENDERED_NEW_MESSAGE`.
+- **품질 가드·OpenAI capability**: `docs/ARCHITECTURE.md`, `docs/ANALYSIS_PIPELINE.md`, `docs/OPERATIONS.md`(§3.3), `docs/TROUBLESHOOTING.md` §5, `README.md` 한 줄.
 
 ### Added
 - **페르소나 그룹·라우트 패밀리**: `src/policies/personaRoutePolicy.ts` — 금융 위원회 vs 트렌드·K-culture 하드 분리, `open_topic_{financial|trend|general}` 분류, `ROUTE_FAMILY_LOCKED` / `PERSONA_GROUP_SELECTED` / `PERSONA_HARD_EXCLUDED` / `OPEN_TOPIC_CLASSIFIED`.

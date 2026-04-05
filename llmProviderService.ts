@@ -142,6 +142,8 @@ export async function generateWithPersonaProvider(params: {
   parallel_execution_used?: boolean;
   /** 관측성: 압축 BASE_CONTEXT 사용 여부 */
   compressed_prompt_used?: boolean;
+  /** OpenAI capability·호환 로그용 */
+  analysisType?: string;
 }): Promise<ProviderGenerationResult> {
   const traceId = `llm-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
   const config = getPersonaModelConfig(params.personaKey);
@@ -228,6 +230,8 @@ export async function generateWithPersonaProvider(params: {
       systemPrompt: personaSystemPrompt(params.personaKey),
       personaName: params.personaName,
       traceId,
+      personaKey: params.personaKey,
+      analysisType: params.analysisType,
       abortSignal: ex?.signal,
       onResponseId: id => ex?.registerOpenAiResponseId(id),
       maxOutputTokens: mergedGen?.maxOutputTokens,

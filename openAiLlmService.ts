@@ -1,6 +1,62 @@
 import { logger } from './logger';
-import type { ProviderGenerationResult } from './analysisTypes';
+import type { PersonaKey, ProviderGenerationResult } from './analysisTypes';
 import { AiExecutionAbortedError } from './src/discord/aiExecution/aiExecutionAbort';
+import { getOpenAiModelCapabilities } from './openAiModelCapabilities';
+
+function extractOpenAiErrorMessage(e: any): string {
+  return String(
+    e?.error?.message || e?.message || e?.response?.data?.error?.message || e || ''
+  ).slice(0, 800);
+}
+
+function openAiErrorSuggestsParamRejection(e: any): boolean {
+  const code = e?.status ?? e?.statusCode ?? e?.response?.status;
+  const msg = extractOpenAiErrorMessage(e);
+  if (code !== 400 && code !== '400') return false;
+  return /temperature|max_output|unsupported|unknown.*param|not.*support|invalid.*parameter|does not support|unrecognized/i.test(
+    msg
+  );
+}
+
+function buildResponsesCreateBody(params: {
+  model: string;
+  input: unknown;
+  maxOutputTokens?: number;
+  temperature?: number;
+}): {
+  body: Record<string, unknown>;
+  preRemovedParams: string[];
+  capabilityFlags: { supportsTemperature: boolean; supportsMaxOutputTokens: boolean };
+} {
+  const caps = getOpenAiModelCapabilities(params.model);
+  const body: Record<string, unknown> = { model: params.model, input: params.input };
+  const preRemovedParams: string[] = [];
+
+  if (params.maxOutputTokens != null) {
+    if (caps.supportsMaxOutputTokens) {
+      body.max_output_tokens = params.maxOutputTokens;
+    } else {
+      preRemovedParams.push('max_output_tokens');
+    }
+  }
+
+  if (params.temperature != null) {
+    if (caps.supportsTemperature) {
+      body.temperature = params.temperature;
+    } else {
+      preRemovedParams.push('temperature');
+    }
+  }
+
+  return {
+    body,
+    preRemovedParams,
+    capabilityFlags: {
+      supportsTemperature: caps.supportsTemperature,
+      supportsMaxOutputTokens: caps.supportsMaxOutputTokens
+    }
+  };
+}
 
 export async function generateOpenAiResponse(params: {
   prompt: string;
@@ -8,6 +64,8 @@ export async function generateOpenAiResponse(params: {
   systemPrompt?: string;
   personaName?: string;
   traceId?: string;
+  personaKey?: PersonaKey;
+  analysisType?: string;
   /** Responses API 응답 id — timeout 시 cancel 시도용 */
   onResponseId?: (id: string) => void;
   abortSignal?: AbortSignal;
@@ -38,7 +96,6 @@ export async function generateOpenAiResponse(params: {
   let OpenAI: any;
   let packageVersion: string | null = null;
   try {
-    // Use runtime require to keep build resilient even before npm install.
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     OpenAI = require('openai');
     try {
@@ -111,26 +168,84 @@ export async function generateOpenAiResponse(params: {
   if (params.abortSignal?.aborted) {
     throw new AiExecutionAbortedError('aborted before openai request');
   }
-  const createBody: Record<string, unknown> = {
+
+  const { body: createBody, preRemovedParams, capabilityFlags } = buildResponsesCreateBody({
     model: params.model,
-    input
-  };
-  if (params.maxOutputTokens != null) createBody.max_output_tokens = params.maxOutputTokens;
-  if (params.temperature != null) createBody.temperature = params.temperature;
+    input,
+    maxOutputTokens: params.maxOutputTokens,
+    temperature: params.temperature
+  });
+
+  logger.info('OPENAI', 'OPENAI_CAPABILITY_APPLIED', {
+    traceId,
+    model: params.model,
+    personaKey: params.personaKey ?? null,
+    analysisType: params.analysisType ?? null,
+    supportsTemperature: capabilityFlags.supportsTemperature,
+    supportsMaxOutputTokens: capabilityFlags.supportsMaxOutputTokens,
+    requestedTemperature: params.temperature ?? null,
+    requestedMaxOutputTokens: params.maxOutputTokens ?? null,
+    payloadKeys: Object.keys(createBody),
+    preRemovedParams
+  });
+  if (preRemovedParams.length) {
+    logger.info('OPENAI', 'OPENAI_UNSUPPORTED_PARAM_REMOVED', {
+      traceId,
+      model: params.model,
+      personaKey: params.personaKey ?? null,
+      analysisType: params.analysisType ?? null,
+      removedParams: preRemovedParams,
+      retryApplied: false
+    });
+  }
 
   let response: any;
   try {
     response = await client.responses.create(createBody as any);
   } catch (e: any) {
+    const errMsg = extractOpenAiErrorMessage(e);
     logger.error('OPENAI', 'openai request failed', {
       traceId,
       personaName: params.personaName || null,
       model: params.model,
       promptLength: String(params.prompt || '').length,
       systemPromptLength: String(params.systemPrompt || '').length,
-      reason: e?.message || String(e)
+      reason: errMsg
     });
-    throw e;
+
+    if (openAiErrorSuggestsParamRejection(e)) {
+      const compatBody: Record<string, unknown> = { model: params.model, input };
+      const dropped = Object.keys(createBody).filter(k => k !== 'model' && k !== 'input');
+      logger.warn('OPENAI', 'OPENAI_RETRY_WITH_COMPAT_PAYLOAD', {
+        traceId,
+        model: params.model,
+        personaKey: params.personaKey ?? null,
+        analysisType: params.analysisType ?? null,
+        removedParams: dropped,
+        originalParams: Object.keys(createBody),
+        firstError: errMsg.slice(0, 400)
+      });
+      try {
+        response = await client.responses.create(compatBody as any);
+        logger.info('OPENAI', 'OPENAI_COMPAT_RETRY_SUCCEEDED', {
+          traceId,
+          model: params.model,
+          personaKey: params.personaKey ?? null,
+          analysisType: params.analysisType ?? null
+        });
+      } catch (e2: any) {
+        logger.error('OPENAI', 'OPENAI_COMPAT_RETRY_FAILED', {
+          traceId,
+          model: params.model,
+          personaKey: params.personaKey ?? null,
+          analysisType: params.analysisType ?? null,
+          reason: extractOpenAiErrorMessage(e2)
+        });
+        throw e2;
+      }
+    } else {
+      throw e;
+    }
   }
 
   const rid = typeof (response as any)?.id === 'string' ? (response as any).id : null;

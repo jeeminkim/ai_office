@@ -31,6 +31,8 @@
 
 1. `OPENAI_API_KEY`, `OPENAI_MONTHLY_MAX_CALLS`, `OPENAI_MONTHLY_BUDGET_USD`, `OPENAI_FALLBACK_TO_GEMINI`.
 2. `LLM_PROVIDER` 로그의 fallback reason.
+3. **OpenAI 400·unsupported parameter**: `logs/openai/openai.log_*`에서 `OPENAI_UNSUPPORTED_PARAM_REMOVED`(이미 사전 제거됐는지) → `OPENAI_RETRY_WITH_COMPAT_PAYLOAD`·`OPENAI_COMPAT_RETRY_*` → 그다음에만 `fallback to gemini`. 모델 테이블은 `openAiModelCapabilities.ts`(예: `gpt-5*` temperature 미전송).
+4. **포트폴리오 응답이 짧거나 구조만 비는 경우**: `logs/llm/llm.log_*`의 `QUALITY_*` — 어느 `personaKey`·`runMode`에서 재생성이 소진됐는지 확인(**docs/OPERATIONS.md** §3.3).
 
 ## 5b. “왜 JYP/금융 위원이 나왔는가” (페르소나 그룹)
 

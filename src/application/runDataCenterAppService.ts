@@ -11,7 +11,8 @@ export async function runDataCenterAppService(params: {
     runtime: {
       discordUserId: params.discordUserId,
       personaKey: 'THIEL',
-      personaName: params.personaName
+      personaName: params.personaName,
+      analysisType: 'data_center_thiel'
     },
     prompt: params.prompt,
     fallbackToGemini: params.fallbackToGemini
