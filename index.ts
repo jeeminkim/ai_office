@@ -63,6 +63,8 @@ import { formatDecisionSummaryForDiscord } from './src/application/runDecisionEn
 import { buildRebalancePlanAppService } from './src/application/buildRebalancePlanAppService';
 import { runTrendAnalysisAppService } from './src/application/runTrendAnalysisAppService';
 import { runOpenTopicDebateAppService } from './src/application/runOpenTopicDebateAppService';
+import { insertFollowupSnapshot } from './src/repositories/followupRepository';
+import { buildFollowupComponentRows } from './followupPromptService';
 import { parseCashflowFlowType } from './src/finance/cashflowCategories';
 import { createPanelAdapter } from './src/discord/adapters/panelAdapter';
 import type { DiscordInteractionContext, UserRiskMode } from './src/discord/InteractionContext';
@@ -1046,7 +1048,7 @@ async function runPortfolioDebate(
     userId: string,
     userQuery: string,
     sourceInteraction: any,
-    opts?: { fastMode?: 'none' | 'light_summary' | 'short_summary' }
+    opts?: { fastMode?: 'none' | 'light_summary' | 'short_summary' | 'retry_summary' }
 ) {
     try {
         const execRes = await runUserVisibleAiExecution({
@@ -1209,7 +1211,10 @@ async function runOpenTopicDebate(
     userId: string,
     userQuery: string,
     sourceInteraction: any,
-    opts?: { fastMode?: 'none' | 'light_summary' | 'short_summary' }
+    opts?: {
+        fastMode?: 'none' | 'light_summary' | 'short_summary';
+        forcedOpenTopicView?: 'financial' | 'trend' | 'general';
+    }
 ) {
     try {
         const execRes = await runUserVisibleAiExecution({
@@ -1226,6 +1231,7 @@ async function runOpenTopicDebate(
                     loadUserMode,
                     execution: handle,
                     fastMode: opts?.fastMode ?? 'none',
+                    forcedOpenTopicView: opts?.forcedOpenTopicView,
                     onPersonaReady: async b => {
                         if (handle.shouldDiscardOutgoing()) return;
                         streamedOpenTopicKeys.add(b.personaKey);
@@ -1245,6 +1251,45 @@ async function runOpenTopicDebate(
                         }
                     }
                 });
+                if (out.status === 'ambiguous_pick') {
+                    handle.clearAllPendingFeedbackFollowup('ambiguous_pick');
+                    const choiceLabels = [
+                        '[금융 관점으로 보기]',
+                        '[트렌드 관점으로 보기]',
+                        '[일반 요약으로 보기]'
+                    ];
+                    const ref = `otamb:${Buffer.from(out.userQuery, 'utf8').toString('base64url').slice(0, 1800)}`;
+                    const ins = await insertFollowupSnapshot({
+                        discordUserId: userId,
+                        chatHistoryRef: ref,
+                        analysisType: 'open_topic_ambiguous_view',
+                        personaName: null,
+                        promptType: 'CHOICE',
+                        options: choiceLabels
+                    });
+                    if (ins?.id) {
+                        const rows = buildFollowupComponentRows(ins.id, 'CHOICE', choiceLabels);
+                        await safeEditReplyPayload(
+                            sourceInteraction,
+                            {
+                                content:
+                                    '📎 **주제가 금융·트렌드 경계에 있거나 일반 질문으로 보입니다.** 관점을 선택해 주세요. _(자동 주문 없음)_',
+                                components: rows
+                            },
+                            'open_topic:ambiguous_pick'
+                        );
+                    } else {
+                        await safeEditReply(
+                            sourceInteraction,
+                            '관점 선택을 준비하지 못했습니다. 잠시 후 다시 시도해 주세요.',
+                            'open_topic:ambiguous_pick_failed'
+                        );
+                    }
+                    if (!handle.shouldDiscardOutgoing()) {
+                        await sendPostNavigationReply(sourceInteraction, 'ai', discordBroadcastDeps);
+                    }
+                    return out;
+                }
                 for (const b of out.broadcasts) {
                     if (streamedOpenTopicKeys.has(b.personaKey)) continue;
                     const feedbackRow = out.chatHistoryId

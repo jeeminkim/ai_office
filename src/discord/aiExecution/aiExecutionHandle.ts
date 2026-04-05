@@ -48,6 +48,12 @@ export class AiExecutionHandle {
   /** `runPortfolioDebateAppService` 등에서 병합하는 AI_PERF 확장 필드 */
   perfMetrics: Record<string, unknown> = {};
 
+  /**
+   * 앱 서비스 진입 후 analysisType이 다른 추론 경로로 덮어쓰이지 않도록 고정한다.
+   * (예: 포트폴리오 토론 중 `guessAnalysisTypeFromTrigger` → `open_topic` 차단)
+   */
+  executionContext?: { routeLocked: boolean; initialRoute: string };
+
   private clearFirstVisibleTimer: (() => void) | null = null;
 
   constructor(userId: string, route: AiExecutionRoute) {
@@ -109,6 +115,72 @@ export class AiExecutionHandle {
 
   setPerfMetrics(partial: Record<string, unknown>): void {
     Object.assign(this.perfMetrics, partial);
+  }
+
+  /** 최초 한 번만 락을 설정하고 `ROUTE_LOCKED` 로그를 남긴다. */
+  lockAnalysisRoute(initialRoute: string): void {
+    if (this.executionContext?.routeLocked) return;
+    this.executionContext = { routeLocked: true, initialRoute };
+    logger.info('ROUTE', 'ROUTE_LOCKED', {
+      executionId: this.executionId,
+      aiRoute: this.route,
+      initialRoute
+    });
+  }
+
+  /**
+   * 락이 걸린 경우 금융 ↔ 오픈토픽 등 교차 덮어쓰기를 막고 `ROUTE_OVERRIDE_BLOCKED`를 남긴다.
+   */
+  coerceAnalysisRoute(candidate: string): string {
+    if (!this.executionContext?.routeLocked) return candidate;
+    const init = this.executionContext.initialRoute;
+    if (candidate === init) return candidate;
+
+    const portfolioLocked = init.startsWith('portfolio_');
+    const openLocked = init.startsWith('open_topic');
+    const trendLocked = init.startsWith('trend_');
+
+    if (portfolioLocked && (candidate.startsWith('open_topic') || candidate.startsWith('trend_'))) {
+      logger.warn('ROUTE', 'ROUTE_OVERRIDE_BLOCKED', {
+        executionId: this.executionId,
+        from: init,
+        to: candidate
+      });
+      return init;
+    }
+    if (openLocked && (candidate.startsWith('portfolio_') || candidate.startsWith('trend_'))) {
+      logger.warn('ROUTE', 'ROUTE_OVERRIDE_BLOCKED', {
+        executionId: this.executionId,
+        from: init,
+        to: candidate
+      });
+      return init;
+    }
+    if (
+      openLocked &&
+      init.includes('open_topic_') &&
+      candidate.startsWith('open_topic_') &&
+      candidate !== init
+    ) {
+      logger.warn('ROUTE', 'ROUTE_OVERRIDE_BLOCKED', {
+        executionId: this.executionId,
+        from: init,
+        to: candidate
+      });
+      return init;
+    }
+    if (trendLocked && (candidate.startsWith('portfolio_') || candidate.startsWith('open_topic'))) {
+      logger.warn('ROUTE', 'ROUTE_OVERRIDE_BLOCKED', {
+        executionId: this.executionId,
+        from: init,
+        to: candidate
+      });
+      return init;
+    }
+    if (openLocked && candidate === 'open_topic') {
+      return init;
+    }
+    return candidate;
   }
 
   /** 조기 전송 직후: chat_history 확정 후 피드백 행을 별도 메시지로 붙일 후보 */

@@ -42,6 +42,7 @@
 
 ### 5) 변경 유형별 정본 갱신 (요약)
 
+- **페르소나 그룹·위원 구성·오픈 토픽 분류** → `docs/ARCHITECTURE.md`, `docs/ANALYSIS_PIPELINE.md`, `docs/OPERATIONS.md`, `docs/DISCORD_UX.md`, `docs/TROUBLESHOOTING.md`, `CHANGELOG.md`(코드: `personaRoutePolicy.ts`, `personaWeightService.ts`, `committeeCompositionService.ts`, `personaSelectionPolicy.ts`).
 - **DB 스키마·테이블** → `docs/DATABASE.md`, `CHANGELOG.md`
 - **모듈 구조·Discord 진입점** → `docs/ARCHITECTURE.md`, 필요 시 `DISCORD_UX.md` / `ANALYSIS_PIPELINE.md`, `CHANGELOG.md`
 - **운영 절차·로그·self-check** → `docs/OPERATIONS.md`, 필요 시 `TROUBLESHOOTING.md`, `CHANGELOG.md`
@@ -85,6 +86,16 @@
 4. **배포 전**
    - 문서 누락이 없을 때만 배포 후보로 간주한다.
 
+## 문서 린트 (`docs:check`)
+
+- **실행**: `npm run docs:check` (`scripts/docs-check.ts`)
+- **PR 또는 문서/구조 관련 변경 시** 실행을 **권장**한다. (로컬·CI에서 가볍게 통과 여부 확인.)
+- **역할 요약**
+  - `README.md`에 입구로 부적절한 장문 키워드 누적이 없는지 경고.
+  - 구명 스텁 3종(`SYSTEM_ARCHITECTURE` / `OPERATIONS_RUNBOOK` / `DATABASE_SCHEMA`)이 **10줄 미만**이고 **`정본은` 문구**를 포함하는지 검사 — 위반 시 **실패(exit 1)**.
+  - `docs/` 안(이력·정책 문서 제외)에서 구 문서 `.md`를 **마크다운 링크 대상**으로 쓰면 **경고**.
+- **정본 외 수정**: 스텁에 본문을 늘리면 위 규칙으로 **실패**한다. 정본이 아닌 파일을 “설명 정본”처럼 키우는 것은 이 스크립트 기준으로도 허용되지 않는다.
+
 ## Self-check / npm script 동기화
 - `package.json`의 `check:*` 스크립트 추가·변경·삭제 시 반드시 함께 갱신한다.
   - `docs/OPERATIONS.md` — self-check·`node dist/*_self_check.js` 목록·배포 전 필수/확장 구분
@@ -92,6 +103,7 @@
   - `docs/TEST_CHECKLIST.md` — 자동 점검 목록
   - `docs/ENVIRONMENT.md` — 새 env가 필요하면
   - `docs/CHANGELOG.md`
+  - 문서 구조·스텁·README 입구 규칙 변경 시: `scripts/docs-check.ts` 및 `npm run docs:check` 동작 확인
   - Phase 2 decision 관련 시: `docs/ARCHITECTURE.md`, `docs/ANALYSIS_PIPELINE.md`, `docs/DATABASE.md`(테이블 추가), `docs/ROADMAP.md`
   - Phase 2 **SQL hardening** 추가 시: `docs/sql/append_phase2_decision_tables_hardening.sql`, `docs/DATABASE.md`, `docs/OPERATIONS.md`, `docs/TEST_CHECKLIST.md`
 

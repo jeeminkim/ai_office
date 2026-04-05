@@ -12,6 +12,11 @@ import { assertActiveExecution } from '../discord/aiExecution/aiExecutionAbort';
 import { collectPartialResult } from '../discord/aiExecution/aiExecutionHelpers';
 import { insertChatHistoryWithLegacyFallback } from '../repositories/chatHistoryRepository';
 import { normalizeProviderOutputForDiscord, personaKeyToPersonaName, toOpinionSummary } from '../discord/analysisFormatting';
+import {
+  analysisTypeToRouteFamily,
+  logPersonaGroupSelected,
+  logRouteFamilyLocked
+} from '../policies/personaRoutePolicy';
 
 export type RunTrendAnalysisAppResult = {
   analysisType: string;
@@ -35,8 +40,23 @@ export async function runTrendAnalysisAppService(params: {
   logger.info('TREND', 'trend analysis route selected', { topic, customId: triggerCustomId ?? null });
   logger.info('TREND', 'portfolio snapshot skipped', { reason: 'trend_pipeline' });
   const cfg = TREND_TOPIC_CONFIG[topic];
+  const analysisTypeEarly = `trend_${topic}`;
+  ex?.lockAnalysisRoute(analysisTypeEarly);
+  logRouteFamilyLocked({
+    routeFamily: analysisTypeToRouteFamily(analysisTypeEarly),
+    analysisType: analysisTypeEarly,
+    discordUserId: userId
+  });
+  logPersonaGroupSelected({
+    analysisType: analysisTypeEarly,
+    personaGroup: 'TREND',
+    trendPersonaKey: cfg.personaKey,
+    agentLabel: cfg.agentLabel,
+    discordUserId: userId,
+    note: 'financial_committee_excluded_by_policy'
+  });
   logger.info('TREND', 'trend persona selected', { personaKey: cfg.personaKey, agentLabel: cfg.agentLabel });
-  ex?.augmentRetryPayload({ analysisType: `trend_${topic}`, topic: String(topic) });
+  ex?.augmentRetryPayload({ analysisType: analysisTypeEarly, topic: String(topic) });
 
   updateHealth(s => (s.ai.lastRoute = 'trend_isolated'));
 
@@ -45,7 +65,11 @@ export async function runTrendAnalysisAppService(params: {
     aiExecution: ex,
     fastShort: params.fastMode === 'short'
   });
-  const text = normalizeProviderOutputForDiscord({ text: textRaw, provider: 'gemini', personaKey: 'TREND' });
+  const text = normalizeProviderOutputForDiscord({
+    text: `_이번 주제는 트렌드·K-culture 전용 경로로 분석했습니다._\n\n${textRaw}`,
+    provider: 'gemini',
+    personaKey: 'TREND'
+  });
   collectPartialResult(ex, cfg.agentLabel, text);
   logger.info('AI', 'Gemini call completed');
   logger.info('AI_PERF', 'trend_pipeline', {

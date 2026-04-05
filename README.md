@@ -1,6 +1,6 @@
 # ai_office
 
-Discord·Node.js·TypeScript·Supabase 기반 투자·포트폴리오 보조 봇. **자동 매매는 하지 않으며**, advisory·그림자 리밸 계획 등은 사용자 확인을 전제로 한다.
+Discord·Node.js·TypeScript·Supabase 기반 투자·포트폴리오 보조 봇. **자동 매매는 하지 않으며**, advisory·그림자 리밸 계획 등은 사용자 확인을 전제로 한다. **금융 위원회**(Ray·Hindenburg·Simons·Drucker·CIO)와 **트렌드·K-culture**(JYP 등) 페르소나는 코드 정책으로 경로가 분리된다(`docs/ARCHITECTURE.md`). 포트폴리오 경량·타임아웃 재시도도 동일 가중치·위원 구성 엔진을 쓰고, 모호한 오픈 토픽은 follow-up으로 관점을 고른다.
 
 ## 핵심 기능
 

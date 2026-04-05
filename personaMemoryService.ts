@@ -2,6 +2,7 @@ import { createClient } from '@supabase/supabase-js';
 import { logger } from './logger';
 import type { PersonaMemory, FeedbackType } from './analysisTypes';
 import { selectPersonaMemoryRow, upsertPersonaMemoryRow } from './src/repositories/personaMemoryRepository';
+import { isCommitteeSkippedPlaceholderResponse } from './src/services/committeeCompositionService';
 
 const supabase = createClient(
   process.env.SUPABASE_URL || '',
@@ -216,6 +217,7 @@ export async function refreshPersonaMemoryFromFeedback(
       const ft = normalizeFeedbackType(String(r.feedback_type || ''));
       if (!ft) continue;
       const opinionText = String(r.opinion_text || '');
+      if (isCommitteeSkippedPlaceholderResponse(opinionText)) continue;
       if (!opinionText.trim()) continue;
 
       const kws = extractKeywords(opinionText);

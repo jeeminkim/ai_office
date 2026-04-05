@@ -6,7 +6,9 @@
 
 - 중앙 호출: `generateWithPersonaProvider` / `llmProviderService.getModelForTask` 등. OpenAI 우선 페르소나(코드 기준): Hindenburg, Simons, Thiel(데이터센터), Hot Trend 등 — 나머지는 기본 Gemini.
 - 예산 초과·오류 시 `OPENAI_FALLBACK_TO_GEMINI` 등으로 Gemini fallback.
-- 프롬프트 압축: `promptCompressionPortfolio.ts` — 기본 **`standard_compressed`**, 재시도 경량·짧은 요약·FAST 트렌드 등은 **`aggressive_compressed`**. Ray∥Hindenburg 병렬, 이후 Simons → Drucker → CIO 순서 유지.
+- 프롬프트 압축: `promptCompressionPortfolio.ts` — 기본 **`standard_compressed`**, 재시도 경량·짧은 요약·FAST 트렌드 등은 **`aggressive_compressed`**.
+- **그룹 분리**: `personaRoutePolicy.ts` — 금융 위원회(FINANCIAL) vs 트렌드·K-culture(TREND). 교차 경로에서 페르소나 선택은 하드 차단.
+- **포트폴리오 위원 구성**: `personaWeightService` + `personaSignalsRepository` + `committeeCompositionService` — 가중치·회피·메모리·**최근 피드백/클레임 피드백(얇은 클램프)** 반영. `runMode`별로 **`full`** / 경량 **`light`** / 타임아웃 재시도 **`retry_summary`** / CIO만 **`short`**. 생략 위원 플레이스홀더는 **압축·trace용**; claim 추출·저장 및 피드백 매핑에서는 스킵. 로그: `PERSONA_WEIGHT_APPLIED`, `COMMITTEE_COMPOSITION_BUILT`, `CLAIM_EXTRACTION_PLACEHOLDER_SKIPPED`, `FEEDBACK_MAPPING_PLACEHOLDER_SKIPPED`.
 
 ## 포트폴리오 토론 흐름
 
@@ -18,6 +20,8 @@
 ## 오픈 토픽·트렌드
 
 - `runOpenTopicDebate` / `runTrendAnalysis` 각각 `runUserVisibleAiExecution` + 해당 `*AppService` + 브로드캐스트.
+- 오픈 토픽: 질의 분류(`OPEN_TOPIC_CLASSIFIED`) 후 `open_topic_financial`·`open_topic_trend`·`open_topic_general` — 그룹에 맞는 페르소나만 LLM에 태운다. **모호·일반(ambiguous)** 이면 `OPEN_TOPIC_AMBIGUOUS_DETECTED` 후 **follow-up 스냅샷**(`open_topic_ambiguous_view`)으로 관점 버튼 → `OPEN_TOPIC_VIEW_SELECTED`·`forcedOpenTopicView`로 재실행(JYP 기본 폴백 없음).
+- 트렌드: `trend_*` 라우트 락, 포트폴리오 스냅샷 미사용, 단일(또는 주제별) 트렌드 에이전트만.
 
 ## 분석 후처리·저장
 

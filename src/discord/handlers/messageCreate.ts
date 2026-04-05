@@ -47,13 +47,16 @@ export type MessageCreateContext = {
       userId: string,
       userQuery: string,
       sourceInteraction: Message,
-      opts?: { fastMode?: 'none' | 'light_summary' | 'short_summary' }
+      opts?: { fastMode?: 'none' | 'light_summary' | 'short_summary' | 'retry_summary' }
     ) => Promise<void>;
     runOpenTopicDebate: (
       userId: string,
       userQuery: string,
       sourceInteraction: Message,
-      opts?: { fastMode?: 'none' | 'light_summary' | 'short_summary' }
+      opts?: {
+        fastMode?: 'none' | 'light_summary' | 'short_summary';
+        forcedOpenTopicView?: 'financial' | 'trend' | 'general';
+      }
     ) => Promise<void>;
   };
 };
@@ -65,7 +68,25 @@ export async function handleMessageCreate(message: Message, ctx: MessageCreateCo
     ctx.logger.info('COMMAND', `message command received: ${message.content}`, { user: message.author.tag });
   }
 
-  if (message.content === '!메뉴' || message.content === '!패널재설치') {
+  if (message.content === '!메뉴') {
+    const panel = ctx.getMainPanel();
+    const ch: any = message.channel;
+    if (typeof ch?.send !== 'function') return;
+    const msg = await ch.send({
+      content: '다음 메뉴를 선택하세요',
+      embeds: panel.embeds,
+      components: panel.components
+    });
+    ctx.savePanelState(msg.channel.id, msg.id);
+    ctx.logger.info('PANEL', 'MENU_RENDERED_NEW_MESSAGE', {
+      channelId: msg.channel.id,
+      messageId: msg.id
+    });
+    ctx.updateHealth(s => (s.panels.lastPanelAction = 'manual_reinstall'));
+    return;
+  }
+
+  if (message.content === '!패널재설치') {
     const state = ctx.loadPanelState();
     let msg: any = null;
     if (state?.channelId === message.channel.id && state.messageId) {

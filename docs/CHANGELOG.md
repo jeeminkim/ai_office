@@ -41,7 +41,27 @@
 - ...
 ```
 
+## 2026-04-06
+
+### Docs
+- 문서 canonical 체계 보호를 위한 `npm run docs:check` 추가 (`scripts/docs-check.ts`). `docs/DOCUMENTATION_POLICY.md` § 문서 린트 참고.
+
 ## 2026-03-28
+
+### Added
+- **위원 `runMode`·경량/재시도 통합**: `committeeCompositionService`에 `light`·`retry_summary`·`short`; 포트폴리오 `light_summary`·`retry_summary`도 `personaWeightService`+`loadPersonaWeightSignalHints`·동일 금융 패밀리(트렌드 페르소나 비개입). 타임아웃 포트폴리오 「요약만 다시」→ `retry_summary`(`timeoutRoutes.ts`). 로그 `COMMITTEE_COMPOSITION_BUILT`·`PERSONA_WEIGHT_APPLIED` 필드 보강(`selectedPersonas`·`recentFeedbackSummary` 등).
+- **오픈 토픽 모호 UX**: `OPEN_TOPIC_AMBIGUOUS_DETECTED` / `OPEN_TOPIC_VIEW_SELECTED`, `followup_snapshots`(`open_topic_ambiguous_view`, `chat_history_ref` `otamb:*`), `runOpenTopicDebate` `forcedOpenTopicView`(`index.ts`, `followupHandlers.ts`, `runOpenTopicDebateAppService.ts`).
+- **Placeholder 격리**: 위원 생략 플레이스홀더는 `analysis_claims`/claim 매핑/`persona_memory` 집계에서 제외, trace·실행 요약은 허용. `CLAIM_EXTRACTION_PLACEHOLDER_SKIPPED`, `FEEDBACK_MAPPING_PLACEHOLDER_SKIPPED`(`analysisPipelineService.ts`, `feedbackIngestionService.ts`, `personaMemoryService.ts`).
+
+### Changed
+- **가중치 신호**: 최근 10건 `analysis_feedback_history` + 30일 `claim_feedback`→`analysis_claims` 매핑으로 얇은 보정(클램프, 리스크 좌석 하한 유지; `personaSignalsRepository.ts`).
+
+### Fixed
+- **라우트 락·분석 타입**: `AiExecutionHandle.lockAnalysisRoute` / `coerceAnalysisRoute` — 포트폴리오 토론에서 `open_topic`·`trend_*`로의 교차 덮어쓰기 차단, 오픈 토픽에서 `portfolio_*` 차단. 로그 `ROUTE_LOCKED`, `ROUTE_OVERRIDE_BLOCKED` (`aiExecutionHandle.ts`, `runPortfolioDebateAppService.ts`, `runOpenTopicDebateAppService.ts`).
+- **오픈 토픽 페르소나**: 프로필 선호 → 질문 힌트 → **Drucker·CIO** 폴백; JYP 기본 폴백 제거 (`runOpenTopicDebateAppService.ts`, `personaSelectionPolicy.ts`).
+- **금융 경로 페르소나 바이어스**: 엔터/트렌드 표시명을 포트폴리오 선호에서 제외 (`runPortfolioDebateAppService.ts`).
+- **`!메뉴`**: 항상 새 메시지로 메인 패널 전송 + `MENU_RENDERED_NEW_MESSAGE` (`messageCreate.ts`).
+- **짧은 페르소나 출력**: 80자 미만 시 한 줄 보강 (`personaResponsePostProcess.ts`).
 
 ### Added
 - **AI 분석 5분 타임아웃·재시도**: `src/discord/aiExecution/*` — `runUserVisibleAiExecution` 래핑(`index.ts` 포트폴리오·트렌드·오픈 토픽), `AiExecutionHandle`·`AbortController`·OpenAI Responses **cancel best-effort**·`broadcastAgentResponse` 폐기 가드·`timeoutRoutes.ts` 버튼(경량/요약/메인 메뉴). in-memory 재시도 payload(`aiExecutionPolicy.ts`). **자동 매매 없음**.
@@ -49,6 +69,7 @@
 - **조기 브로드캐스트 후 피드백 분리**: `registerPendingFeedbackFollowup` → `chat_history` 확정 후 `sendFeedbackFollowupAttachMessage`(`discordBroadcastService.ts`)로 봇 메시지에 기존 `feedback:save:*` 행 부착. 로그 `FEEDBACK_FOLLOWUP_ATTACH_PENDING` / `ATTACHED` / `SKIPPED`, 중복 방지.
 - **`AI_PERF` 실행 요약**: `first_visible_latency_ms`, `execution_summary`(`total_execution_time_ms`, `prompt_build_time_ms`, `persona_parallel_wall_time_ms`, `cio_stage_time_ms`, `compressed_prompt_mode`, `retry_mode_used`, `partial_fallback_used`) — `aiExecutionHandle.ts`·앱 서비스.
 - **압축 모드 구분**: `standard_compressed`(기본) vs `aggressive_compressed`(재시도 경량·요약·FAST 트렌드 등); `AI_PERF`에 기록.
+- **`personaSelectionPolicy.ts`**: 금융 제외 집합·오픈 토픽 표시명→키 매핑; 트렌드 호출 시 `PERSONA_SELECTION_POLICY_APPLIED` (`trendAnalysis.ts`).
 
 ### Changed
 - **`InteractionRuntimeBundle`**: `runPortfolioDebate` / `runOpenTopicDebate` / `runTrendAnalysis`에 선택 인자 `opts.fastMode` (timeout 재시도·경량 경로).
@@ -63,6 +84,19 @@
 - 동일 날짜 후속(피드백 follow-up·`AI_PERF`·압축 모드·Drucker/CIO 선계산): `README.md`, `docs/SYSTEM_ARCHITECTURE.md`, `docs/OPERATIONS_RUNBOOK.md`, `docs/TEST_CHECKLIST.md`.
 - **문서 구조 정리(후속)**: README 입구 문서화 축소; `docs/ARCHITECTURE.md`, `docs/OPERATIONS.md`, `docs/DATABASE.md`, `docs/DISCORD_UX.md`, `docs/ANALYSIS_PIPELINE.md`, `docs/TROUBLESHOOTING.md` 신설·분리. `SYSTEM_ARCHITECTURE.md`·`OPERATIONS_RUNBOOK.md`·`DATABASE_SCHEMA.md`는 리다이렉트 스텁. `DOCUMENTATION_POLICY.md` 정식 파일명 반영.
 - **성능·피드백 UX 문서 정렬**: README, `docs/ANALYSIS_PIPELINE.md`, 정본(`ARCHITECTURE`·`DISCORD_UX`·`OPERATIONS`) 교차 참고에 조기 브로드캐스트 피드백 follow-up, `AI_PERF`·`first_visible_latency_ms`, 압축 모드 안내.
+- **라우트 락·페르소나·`!메뉴`**: `docs/DISCORD_UX.md`, `docs/ARCHITECTURE.md`, `docs/OPERATIONS.md` — 신규 메시지 메뉴, `ROUTE_*`·`PERSONA_SELECTION_POLICY_APPLIED`·`MENU_RENDERED_NEW_MESSAGE`.
+
+### Added
+- **페르소나 그룹·라우트 패밀리**: `src/policies/personaRoutePolicy.ts` — 금융 위원회 vs 트렌드·K-culture 하드 분리, `open_topic_{financial|trend|general}` 분류, `ROUTE_FAMILY_LOCKED` / `PERSONA_GROUP_SELECTED` / `PERSONA_HARD_EXCLUDED` / `OPEN_TOPIC_CLASSIFIED`.
+- **가중치·위원 구성**: `src/services/personaWeightService.ts`(`PERSONA_WEIGHT_APPLIED`), `src/services/committeeCompositionService.ts`(`COMMITTEE_COMPOSITION_BUILT`) — 프로필·메모리 기반, 리스크 좌석 하한·SIMONS 확률 포함.
+
+### Changed
+- **`runPortfolioDebateAppService.ts`**: Drucker·CIO 고정, Ray/Hindenburg/Simons는 계획에 따라 생략 가능(플레이스홀더·파이프라인·의사결정 출력 동기화). CIO 말미 한 줄 안내.
+- **`runOpenTopicDebateAppService.ts`**: 질의 분류 후 그룹별 페르소나만 선택; 트렌드 오픈은 JYP 계열만, 금융 오픈은 Ray/Simons/Drucker/CIO만.
+- **`runTrendAnalysisAppService.ts`**, **`aiExecutionHandle.ts`**: `trend_*` 라우트 락·금융/오픈 교차 차단 강화.
+
+### Docs
+- `README.md`, `docs/ARCHITECTURE.md`, `docs/OPERATIONS.md`, `docs/DISCORD_UX.md`, `docs/ANALYSIS_PIPELINE.md`, `docs/TROUBLESHOOTING.md`, `docs/DOCUMENTATION_POLICY.md` — 그룹 분리·위원 엔진·오픈 토픽 분류·관측 로그.
 
 ## 2026-03-29
 

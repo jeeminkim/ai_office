@@ -6,7 +6,7 @@ import {
   HindenburgAgent
 } from '../../agents';
 import { buildPortfolioSnapshot } from '../../portfolioService';
-import { loadUserProfile } from '../../profileService';
+import { loadUserProfile, type UserProfile } from '../../profileService';
 import { loadPersonaMemory } from '../../personaMemoryService';
 import { buildPersonaPromptContext, buildBaseAnalysisContext } from '../../analysisContextService';
 import { runAnalysisPipeline } from '../../analysisPipelineService';
@@ -21,7 +21,19 @@ import {
   personaKeyToPersonaName,
   toOpinionSummary
 } from '../discord/analysisFormatting';
-import { extractClaimsByContract } from '../contracts/claimContract';
+import {
+  EXCLUDED_FROM_PORTFOLIO_FINANCIAL_DISPLAY,
+  logPersonaSelectionPolicyApplied
+} from '../discord/personaSelectionPolicy';
+import { analysisTypeToRouteFamily, logPersonaGroupSelected, logRouteFamilyLocked } from '../policies/personaRoutePolicy';
+import {
+  buildFinancialCommitteePlan,
+  COMMITTEE_SKIPPED_PLACEHOLDER,
+  isCommitteeSkippedPlaceholderResponse
+} from '../services/committeeCompositionService';
+import { computeFinancialPersonaWeights } from '../services/personaWeightService';
+import { loadPersonaWeightSignalHints } from '../repositories/personaSignalsRepository';
+import { extractClaimsByContract, type ClaimExtractionResult } from '../contracts/claimContract';
 import {
   aggregateFeedbackAdjustmentMeta,
   buildCioCalibrationPromptBlock,
@@ -102,6 +114,80 @@ function requiresLifestyleAnchorsForTrigger(customId?: string): boolean {
   return customId === 'panel:finance:analyze_spending' || customId === 'panel:ai:spending';
 }
 
+type PortfolioSnap = Awaited<ReturnType<typeof buildPortfolioSnapshot>>;
+
+async function preparePortfolioFastCommittee(params: {
+  userId: string;
+  analysisType: string;
+  mode: 'SAFE' | 'BALANCED' | 'AGGRESSIVE';
+  userQuery: string;
+  snapshot: PortfolioSnap;
+  profile: UserProfile;
+  partialScopeFast: string;
+  runMode: 'light' | 'retry_summary';
+}) {
+  const hints = await loadPersonaWeightSignalHints(params.userId);
+  const keys = ['RAY', 'HINDENBURG', 'SIMONS', 'DRUCKER', 'CIO'] as const;
+  const personaMemoryByKey = new Map<(typeof keys)[number], PersonaMemory>();
+  await Promise.all(
+    keys.map(async k => {
+      const personaMemory = await loadPersonaMemory(params.userId, personaKeyToPersonaName(k));
+      personaMemoryByKey.set(k, personaMemory);
+    })
+  );
+  const memories = {
+    RAY: personaMemoryByKey.get('RAY') ?? null,
+    HINDENBURG: personaMemoryByKey.get('HINDENBURG') ?? null,
+    SIMONS: personaMemoryByKey.get('SIMONS') ?? null,
+    DRUCKER: personaMemoryByKey.get('DRUCKER') ?? null,
+    CIO: personaMemoryByKey.get('CIO') ?? null
+  };
+  const weightMeta = computeFinancialPersonaWeights({
+    userId: params.userId,
+    profile: params.profile,
+    memories,
+    signalHints: hints,
+    observability: { analysisType: params.analysisType, routeFamily: 'financial' }
+  });
+  const committeePlan = buildFinancialCommitteePlan({
+    userId: params.userId,
+    analysisType: params.analysisType,
+    profile: params.profile,
+    weightMeta,
+    runMode: params.runMode
+  });
+  const quoteQualityPlain = params.snapshot.summary.quote_quality_note
+    ? String(params.snapshot.summary.quote_quality_note)
+    : '';
+  const profilePromptParts: string[] = [];
+  if (params.profile.risk_tolerance) profilePromptParts.push(`risk_tolerance=${params.profile.risk_tolerance}`);
+  if (params.profile.investment_style) profilePromptParts.push(`investment_style=${params.profile.investment_style}`);
+  if (params.profile.favored_analysis_styles?.length)
+    profilePromptParts.push(`favored_analysis_styles=${params.profile.favored_analysis_styles.join(',')}`);
+  const profileOneLiner = profilePromptParts.join(' | ').slice(0, 520);
+  const modePromptLine = `${params.mode} — SAFE=보수적, BALANCED=중립, AGGRESSIVE=공격적 톤 반영`;
+  const compressedBaseCore = buildPortfolioBaseContext({
+    mode: modePromptLine,
+    userQuery: params.userQuery,
+    snapshot: params.snapshot,
+    partialScopeBlock: params.partialScopeFast || undefined,
+    profileOneLiner: profileOneLiner || undefined,
+    quoteQualityBlock: quoteQualityPlain || undefined,
+    compressionMode: 'aggressive_compressed'
+  });
+  const compressedBase = `${compressedBaseCore}\n[ADVISORY_ONLY] 자동 주문·자동 매매 없음. 조언·정보 목적.`;
+  const memDir = (k: (typeof keys)[number]) => {
+    const personaMemory = personaMemoryByKey.get(k)!;
+    return buildPersonaPromptContext({
+      personaKey: k,
+      personaName: personaKeyToPersonaName(k),
+      personaMemory,
+      baseContext: {}
+    }).memory_directive;
+  };
+  return { committeePlan, compressedBase, memDir };
+}
+
 export async function runPortfolioDebateAppService(params: {
   userId: string;
   userQuery: string;
@@ -109,8 +195,8 @@ export async function runPortfolioDebateAppService(params: {
   loadUserMode: (id: string) => Promise<'SAFE' | 'BALANCED' | 'AGGRESSIVE'>;
   getFinancialAnchorState: () => Promise<{ hasPortfolio: boolean; hasLifestyle: boolean }>;
   execution?: AiExecutionHandle | null;
-  /** timeout 재시도: 경량 위원·짧은 출력 */
-  fastMode?: 'none' | 'light_summary' | 'short_summary';
+  /** timeout 재시도: 경량 위원·짧은 출력 · 요약 재시도(리스크+COO+CIO) */
+  fastMode?: 'none' | 'light_summary' | 'short_summary' | 'retry_summary';
   /** 첫 페르소나 완료 시 즉시 UI 전송(피드백 버튼은 최종 루프에서만, 중복 방지용 스킵) */
   onPersonaSegmentReady?: (seg: PortfolioDebateSegment) => void | Promise<void>;
 }): Promise<RunPortfolioDebateAppResult> {
@@ -155,9 +241,29 @@ export async function runPortfolioDebateAppService(params: {
 
     updateHealth(s => (s.ai.lastNoDataTriggered = false));
 
+    const partialScopeFast =
+      hasPortfolio && !anchorState.hasLifestyle
+        ? [
+            '[분석 범위]',
+            '- 현재 등록된 **포트폴리오 스냅샷 기준 부분 분석**이다.',
+            '- **생활비 적합성·월 투자여력·현금버퍼 적정성** 등은 지출/현금흐름 데이터 없이 **정밀 판단 불가** — 답변에서 "부분 분석"과 "정밀 분석 불가"를 구분해 명시하라.',
+            '- 지출·현금흐름을 입력하면 위 항목을 정밀화할 수 있다.'
+          ].join('\n')
+        : '';
+
     assertActiveExecution(ex, 'portfolio:post_gate');
 
-    const analysisType = guessAnalysisTypeFromTrigger(triggerCustomId, userQuery);
+    let analysisType = guessAnalysisTypeFromTrigger(triggerCustomId, userQuery);
+    if (analysisType === 'open_topic') {
+      logger.warn('ROUTE', 'ROUTE_OVERRIDE_BLOCKED', {
+        executionId: ex?.executionId,
+        from: 'portfolio_financial',
+        to: analysisType
+      });
+      analysisType = 'portfolio_financial';
+    }
+    ex?.lockAnalysisRoute(analysisType);
+    analysisType = ex?.coerceAnalysisRoute(analysisType) ?? analysisType;
     ex?.augmentRetryPayload({
       analysisType,
       portfolioSnapshot: {
@@ -169,15 +275,49 @@ export async function runPortfolioDebateAppService(params: {
     });
 
     if (params.fastMode === 'short_summary') {
+      const profile = await loadUserProfile(userId);
+      const hintsShort = await loadPersonaWeightSignalHints(userId);
+      const memKeysShort = ['RAY', 'HINDENBURG', 'SIMONS', 'DRUCKER', 'CIO'] as const;
+      const pmShort: Partial<Record<PersonaKey, PersonaMemory>> = {};
+      await Promise.all(
+        memKeysShort.map(async k => {
+          pmShort[k] = await loadPersonaMemory(userId, personaKeyToPersonaName(k));
+        })
+      );
+      const weightMetaShort = computeFinancialPersonaWeights({
+        userId,
+        profile,
+        memories: {
+          RAY: pmShort.RAY ?? null,
+          HINDENBURG: pmShort.HINDENBURG ?? null,
+          SIMONS: pmShort.SIMONS ?? null,
+          DRUCKER: pmShort.DRUCKER ?? null,
+          CIO: pmShort.CIO ?? null
+        },
+        signalHints: hintsShort,
+        observability: { analysisType, routeFamily: 'financial' }
+      });
+      buildFinancialCommitteePlan({
+        userId,
+        analysisType,
+        profile,
+        weightMeta: weightMetaShort,
+        runMode: 'short'
+      });
+      const partialSeg =
+        ex?.partialSegments?.length ?
+          `${ex.partialSegments.map(s => `${s.persona}: ${s.excerpt}`).join('\n')}\n`
+        : '';
       const compressed = buildPortfolioBaseContext({
         mode,
         userQuery,
         snapshot,
+        partialScopeBlock: partialScopeFast || undefined,
         profileOneLiner: undefined,
         quoteQualityBlock: snapshot.summary.quote_quality_note || undefined,
         compressionMode: 'aggressive_compressed'
       });
-      const prompt = `${buildTaskPrompt('retry_summary')}\n[FAST_SUMMARY_ONLY]\n${compressed}`;
+      const prompt = `${buildTaskPrompt('retry_summary')}\n[FAST_SUMMARY_ONLY]\n${partialSeg ? `[PRIOR_PARTIAL]\n${partialSeg}` : ''}${compressed}`;
       assertActiveExecution(ex, 'portfolio:short:pre_llm');
       const raw = await generateGeminiResponse({
         model: getModelForTask('RETRY_LIGHT'),
@@ -192,7 +332,6 @@ export async function runPortfolioDebateAppService(params: {
         personaKey: 'CIO'
       });
       collectPartialResult(ex, 'Stanley Druckenmiller (CIO) · 요약', summaryText);
-      const profile = await loadUserProfile(userId);
       const chatHistoryPayload: Record<string, unknown> = {
         user_id: userId,
         user_query: userQuery,
@@ -224,7 +363,7 @@ export async function runPortfolioDebateAppService(params: {
           userProfile: profile,
           snapshotSummary: snapshot.summary,
           snapshotPositionsCount: snapshot.positions.length,
-          partialScope: undefined
+          partialScope: partialScopeFast || undefined
         });
         await runAnalysisPipeline({
           discordUserId: userId,
@@ -260,50 +399,361 @@ export async function runPortfolioDebateAppService(params: {
       };
     }
 
-    if (params.fastMode === 'light_summary') {
-      const ray = new RayDalioAgent();
-      const cio = new StanleyDruckenmillerAgent();
-      await Promise.all([ray.initializeContext(userId), cio.initializeContext(userId)]);
-      ray.setPortfolioSnapshot(snapshot.positions);
-      cio.setPortfolioSnapshot(snapshot.positions);
+    if (params.fastMode === 'retry_summary') {
       const profile = await loadUserProfile(userId);
-      const profileOneLiner = [
-        profile.risk_tolerance && `risk=${profile.risk_tolerance}`,
-        profile.investment_style && `style=${profile.investment_style}`
-      ]
-        .filter(Boolean)
-        .join(' | ');
-      const compressedLight = buildPortfolioBaseContext({
+      const { committeePlan, compressedBase, memDir } = await preparePortfolioFastCommittee({
+        userId,
+        analysisType,
         mode,
         userQuery,
         snapshot,
-        profileOneLiner: profileOneLiner || undefined,
-        quoteQualityBlock: snapshot.summary.quote_quality_note || undefined,
-        compressionMode: 'aggressive_compressed'
+        profile,
+        partialScopeFast,
+        runMode: 'retry_summary'
       });
-      const lightNote = '[LIGHT_COMMITTEE_RETRY]\nRay와 CIO 두 명만 호출한다. 핵심 bullet 위주로 간결히.\n';
-      const rayQuery = `${lightNote}${compressedLight}\n\n${buildPersonaContext({
-        personaKey: 'RAY',
-        personaBiasDirective: '',
-        memoryDirective: ''
-      })}\n\n${buildTaskPrompt('persona_brevity')}`;
-      assertActiveExecution(ex, 'portfolio:light:pre_ray');
-      const rayResRaw = await ray.analyze(rayQuery, false, GEM_PERSONA_CAPS);
-      assertActiveExecution(ex, 'portfolio:light:post_ray');
-      const rayRes = normalizeProviderOutputForDiscord({ text: rayResRaw, provider: 'gemini', personaKey: 'RAY' });
-      collectPartialResult(ex, 'Ray Dalio (PB)', rayRes);
-      if (rayRes?.includes('[REASON: NO_DATA]')) {
-        return { status: 'aborted_silent' };
+      const SK = COMMITTEE_SKIPPED_PLACEHOLDER;
+      const ray = new RayDalioAgent();
+      const hindenburg = new HindenburgAgent();
+      const drucker = new PeterDruckerAgent();
+      const cio = new StanleyDruckenmillerAgent();
+      await Promise.all([
+        ray.initializeContext(userId),
+        hindenburg.initializeContext(userId),
+        drucker.initializeContext(userId),
+        cio.initializeContext(userId)
+      ]);
+      ray.setPortfolioSnapshot(snapshot.positions);
+      hindenburg.setPortfolioSnapshot(snapshot.positions);
+      drucker.setPortfolioSnapshot(snapshot.positions);
+      cio.setPortfolioSnapshot(snapshot.positions);
+
+      const notifyRetrySeg = async (key: PersonaKey, text: string) => {
+        const cb = params.onPersonaSegmentReady;
+        if (!cb) return;
+        const m = PORTFOLIO_SEGMENT_META[key];
+        if (!m) return;
+        await cb({ key, agentName: m.agentName, avatarUrl: m.avatarUrl, text });
+      };
+
+      const runNote = '[RETRY_SUMMARY_COMMITTEE]\n리스크 1인 + COO + CIO. 간결 bullet.\n';
+      let rayRes = SK('Ray Dalio (PB)');
+      let hindenburgGen: ProviderGenerationResult = {
+        text: SK('HINDENBURG_ANALYST'),
+        provider: 'gemini',
+        model: 'committee-skip'
+      };
+      let hindenburgRes = hindenburgGen.text;
+
+      if (committeePlan.runRay) {
+        const rq = `${runNote}${compressedBase}\n\n${buildPersonaContext({
+          personaKey: 'RAY',
+          personaBiasDirective: '',
+          memoryDirective: memDir('RAY'),
+          compressionMode: 'aggressive_compressed'
+        })}\n\n${buildTaskPrompt('persona_brevity')}`;
+        assertActiveExecution(ex, 'portfolio:retry:pre_ray');
+        const rayResRaw = await ray.analyze(rq, false, GEM_PERSONA_CAPS);
+        assertActiveExecution(ex, 'portfolio:retry:post_ray');
+        rayRes = normalizeProviderOutputForDiscord({ text: rayResRaw, provider: 'gemini', personaKey: 'RAY' });
+        collectPartialResult(ex, 'Ray Dalio (PB)', rayRes);
+        if (rayRes?.includes('[REASON: NO_DATA]')) {
+          return { status: 'aborted_silent' };
+        }
+        await notifyRetrySeg('RAY', rayRes);
+      } else if (committeePlan.runHindenburg) {
+        const hq = `${runNote}${compressedBase}\n\n${buildPersonaContext({
+          personaKey: 'HINDENBURG',
+          personaBiasDirective: '',
+          memoryDirective: memDir('HINDENBURG'),
+          compressionMode: 'aggressive_compressed'
+        })}\n\n${buildTaskPrompt('persona_brevity')}`;
+        assertActiveExecution(ex, 'portfolio:retry:pre_hindenburg');
+        hindenburgGen = await generateWithPersonaProvider({
+          discordUserId: userId,
+          personaKey: 'HINDENBURG',
+          personaName: personaKeyToPersonaName('HINDENBURG'),
+          prompt: hq,
+          aiExecution: ex ?? undefined,
+          taskType: 'PERSONA_ANALYSIS',
+          generation: OPENAI_PERSONA_CAPS,
+          parallel_execution_used: false,
+          compressed_prompt_used: true,
+          fallbackToGemini: async () => asGeminiResult(await hindenburg.analyze(hq, false, GEM_PERSONA_CAPS))
+        });
+        assertActiveExecution(ex, 'portfolio:retry:post_hindenburg');
+        hindenburgRes = normalizeProviderOutputForDiscord({
+          text: hindenburgGen.text,
+          provider: hindenburgGen.provider,
+          personaKey: 'HINDENBURG'
+        });
+        collectPartialResult(ex, 'HINDENBURG_ANALYST', hindenburgRes);
+        await notifyRetrySeg('HINDENBURG', hindenburgRes);
       }
+
+      const riskPeers: { label: string; text: string }[] = [];
+      if (committeePlan.runRay) riskPeers.push({ label: 'Ray', text: rayRes });
+      if (committeePlan.runHindenburg) riskPeers.push({ label: 'Hindenburg', text: hindenburgRes });
+
+      let druckerRes = SK('Peter Drucker (COO)');
+      if (committeePlan.runDrucker) {
+        const druckerCombinedLog = `${buildTaskPrompt('persona_brevity')}\n${compressPersonaOutputsForCio(
+          riskPeers.length ? riskPeers : [{ label: 'Risk', text: rayRes }],
+          340
+        )}${memDir('DRUCKER') ? `\n\n[MEMORY]\n${truncateUtf8Chars(memDir('DRUCKER'), 700)}` : ''}`;
+        assertActiveExecution(ex, 'portfolio:retry:pre_drucker');
+        const druckerResRaw = await drucker.summarizeAndGenerateActions(false, druckerCombinedLog, GEM_PERSONA_CAPS);
+        assertActiveExecution(ex, 'portfolio:retry:post_drucker');
+        druckerRes = normalizeProviderOutputForDiscord({ text: druckerResRaw, provider: 'gemini', personaKey: 'DRUCKER' });
+        collectPartialResult(ex, 'Peter Drucker (COO)', druckerRes);
+        await notifyRetrySeg('DRUCKER', druckerRes);
+      }
+
+      const cioPeers = [...riskPeers, { label: 'Drucker', text: druckerRes }];
+      const tCioRetry = Date.now();
+      assertActiveExecution(ex, 'portfolio:retry:pre_cio');
+      const cioResRaw = await cio.decide(
+        false,
+        `${buildTaskPrompt('persona_brevity')}\n[RETRY_SUMMARY_CIO]\n${compressPersonaOutputsForCio(cioPeers, 900)}${memDir('CIO') ? `\n\n[MEMORY]\n${truncateUtf8Chars(memDir('CIO'), 500)}` : ''}`,
+        GEM_CIO_CAPS
+      );
+      assertActiveExecution(ex, 'portfolio:retry:post_cio');
+      const cioRes = normalizeProviderOutputForDiscord({ text: cioResRaw, provider: 'gemini', personaKey: 'CIO' });
+      collectPartialResult(ex, 'Stanley Druckenmiller (CIO)', cioRes);
+      await notifyRetrySeg('CIO', cioRes);
+
+      ex?.setPerfMetrics({
+        compressed_prompt_mode: 'aggressive_compressed',
+        retry_mode_used: 'retry_summary',
+        persona_parallel_wall_time_ms: 0,
+        prompt_build_time_ms: null,
+        cio_stage_time_ms: Date.now() - tCioRetry
+      });
+
+      const chatHistoryPayload: Record<string, unknown> = {
+        user_id: userId,
+        user_query: userQuery,
+        ray_advice: committeePlan.runRay ? rayRes : null,
+        jyp_insight: null,
+        simons_opportunity: null,
+        drucker_decision: druckerRes,
+        cio_decision: cioRes,
+        jyp_weekly_report: null,
+        summary: toOpinionSummary(cioRes, 900),
+        key_risks: committeePlan.runHindenburg
+          ? toOpinionSummary(hindenburgRes, 1200)
+          : committeePlan.runRay
+            ? toOpinionSummary(rayRes, 800)
+            : null,
+        key_actions: toOpinionSummary(druckerRes, 800)
+      };
+      const chatHistoryId = await insertChatHistoryWithLegacyFallback(chatHistoryPayload, true);
+      assertActiveExecution(ex, 'portfolio:retry:post_insert');
+
+      const personaOutputsRetry: Array<{
+        personaKey: PersonaKey;
+        personaName: string;
+        responseText: string;
+        providerName?: string;
+        modelName?: string;
+        estimatedCostUsd?: number;
+      }> = [];
+      if (committeePlan.runRay) {
+        personaOutputsRetry.push({
+          personaKey: 'RAY',
+          personaName: personaKeyToPersonaName('RAY'),
+          responseText: rayRes,
+          providerName: 'gemini',
+          modelName: 'gemini-2.5-flash'
+        });
+      }
+      if (committeePlan.runHindenburg) {
+        personaOutputsRetry.push({
+          personaKey: 'HINDENBURG',
+          personaName: personaKeyToPersonaName('HINDENBURG'),
+          responseText: hindenburgRes,
+          providerName: hindenburgGen.provider,
+          modelName: hindenburgGen.model,
+          estimatedCostUsd: hindenburgGen.estimated_cost_usd
+        });
+      }
+      if (committeePlan.runDrucker) {
+        personaOutputsRetry.push({
+          personaKey: 'DRUCKER',
+          personaName: personaKeyToPersonaName('DRUCKER'),
+          responseText: druckerRes,
+          providerName: 'gemini',
+          modelName: 'gemini-2.5-flash'
+        });
+      }
+      personaOutputsRetry.push({
+        personaKey: 'CIO',
+        personaName: personaKeyToPersonaName('CIO'),
+        responseText: cioRes,
+        providerName: 'gemini',
+        modelName: 'gemini-2.5-flash'
+      });
+
+      if (chatHistoryId) {
+        const baseContext = buildBaseAnalysisContext({
+          discordUserId: userId,
+          analysisType,
+          userQuery,
+          mode,
+          userProfile: profile,
+          snapshotSummary: snapshot.summary,
+          snapshotPositionsCount: snapshot.positions.length,
+          partialScope: partialScopeFast || undefined
+        });
+        await runAnalysisPipeline({
+          discordUserId: userId,
+          chatHistoryId,
+          analysisType,
+          personaOutputs: personaOutputsRetry,
+          baseContext
+        });
+      }
+
+      const orderedKeysRetry: PersonaKey[] = ([] as PersonaKey[])
+        .concat(committeePlan.runRay ? (['RAY'] as const) : [])
+        .concat(committeePlan.runHindenburg ? (['HINDENBURG'] as const) : [])
+        .concat(committeePlan.runDrucker ? (['DRUCKER'] as const) : [])
+        .concat(['CIO'] as const);
+
+      const resultByKeyRetry: Record<PersonaKey, string> = {
+        RAY: rayRes,
+        HINDENBURG: hindenburgRes,
+        SIMONS: '',
+        DRUCKER: druckerRes,
+        CIO: cioRes,
+        JYP: '',
+        TREND: '',
+        OPEN_TOPIC: '',
+        THIEL: '',
+        HOT_TREND: ''
+      };
+      const segmentsRetry: PortfolioDebateSegment[] = [];
+      for (const k of orderedKeysRetry) {
+        const meta = PORTFOLIO_SEGMENT_META[k];
+        if (!meta) continue;
+        segmentsRetry.push({ key: k, agentName: meta.agentName, avatarUrl: meta.avatarUrl, text: resultByKeyRetry[k] });
+      }
+
+      return {
+        status: 'ok',
+        analysisType,
+        chatHistoryId,
+        orderedKeys: orderedKeysRetry,
+        segments: segmentsRetry,
+        decisionArtifact: null,
+        feedbackCalibrationLine: null
+      };
+    }
+
+    if (params.fastMode === 'light_summary') {
+      const profile = await loadUserProfile(userId);
+      const { committeePlan, compressedBase, memDir } = await preparePortfolioFastCommittee({
+        userId,
+        analysisType,
+        mode,
+        userQuery,
+        snapshot,
+        profile,
+        partialScopeFast,
+        runMode: 'light'
+      });
+      const SK = COMMITTEE_SKIPPED_PLACEHOLDER;
+      const ray = new RayDalioAgent();
+      const hindenburg = new HindenburgAgent();
+      const cio = new StanleyDruckenmillerAgent();
+      await Promise.all([
+        ray.initializeContext(userId),
+        hindenburg.initializeContext(userId),
+        cio.initializeContext(userId)
+      ]);
+      ray.setPortfolioSnapshot(snapshot.positions);
+      hindenburg.setPortfolioSnapshot(snapshot.positions);
+      cio.setPortfolioSnapshot(snapshot.positions);
+
+      const notifyLightSeg = async (key: PersonaKey, text: string) => {
+        const cb = params.onPersonaSegmentReady;
+        if (!cb) return;
+        const m = PORTFOLIO_SEGMENT_META[key];
+        if (!m) return;
+        await cb({ key, agentName: m.agentName, avatarUrl: m.avatarUrl, text });
+      };
+
+      const lightNote = '[LIGHT_COMMITTEE_RETRY]\n가중치 기반 리스크 1인 + CIO. 핵심 bullet.\n';
+      let rayRes = SK('Ray Dalio (PB)');
+      let hindenburgGenLight: ProviderGenerationResult = {
+        text: SK('HINDENBURG_ANALYST'),
+        provider: 'gemini',
+        model: 'committee-skip'
+      };
+      let hindenburgRes = hindenburgGenLight.text;
+
+      if (committeePlan.runRay) {
+        const rayQuery = `${lightNote}${compressedBase}\n\n${buildPersonaContext({
+          personaKey: 'RAY',
+          personaBiasDirective: '',
+          memoryDirective: memDir('RAY'),
+          compressionMode: 'aggressive_compressed'
+        })}\n\n${buildTaskPrompt('persona_brevity')}`;
+        assertActiveExecution(ex, 'portfolio:light:pre_ray');
+        const rayResRaw = await ray.analyze(rayQuery, false, GEM_PERSONA_CAPS);
+        assertActiveExecution(ex, 'portfolio:light:post_ray');
+        rayRes = normalizeProviderOutputForDiscord({ text: rayResRaw, provider: 'gemini', personaKey: 'RAY' });
+        collectPartialResult(ex, 'Ray Dalio (PB)', rayRes);
+        if (rayRes?.includes('[REASON: NO_DATA]')) {
+          return { status: 'aborted_silent' };
+        }
+        await notifyLightSeg('RAY', rayRes);
+      } else if (committeePlan.runHindenburg) {
+        const hq = `${lightNote}${compressedBase}\n\n${buildPersonaContext({
+          personaKey: 'HINDENBURG',
+          personaBiasDirective: '',
+          memoryDirective: memDir('HINDENBURG'),
+          compressionMode: 'aggressive_compressed'
+        })}\n\n${buildTaskPrompt('persona_brevity')}`;
+        assertActiveExecution(ex, 'portfolio:light:pre_hindenburg');
+        hindenburgGenLight = await generateWithPersonaProvider({
+          discordUserId: userId,
+          personaKey: 'HINDENBURG',
+          personaName: personaKeyToPersonaName('HINDENBURG'),
+          prompt: hq,
+          aiExecution: ex ?? undefined,
+          taskType: 'PERSONA_ANALYSIS',
+          generation: OPENAI_PERSONA_CAPS,
+          parallel_execution_used: false,
+          compressed_prompt_used: true,
+          fallbackToGemini: async () => asGeminiResult(await hindenburg.analyze(hq, false, GEM_PERSONA_CAPS))
+        });
+        assertActiveExecution(ex, 'portfolio:light:post_hindenburg');
+        hindenburgRes = normalizeProviderOutputForDiscord({
+          text: hindenburgGenLight.text,
+          provider: hindenburgGenLight.provider,
+          personaKey: 'HINDENBURG'
+        });
+        collectPartialResult(ex, 'HINDENBURG_ANALYST', hindenburgRes);
+        await notifyLightSeg('HINDENBURG', hindenburgRes);
+      }
+
+      const riskPeersLight: { label: string; text: string }[] = [];
+      if (committeePlan.runRay) riskPeersLight.push({ label: 'Ray', text: rayRes });
+      if (committeePlan.runHindenburg) riskPeersLight.push({ label: 'Hindenburg', text: hindenburgRes });
+
       const tCioLight = Date.now();
       const cioResRaw = await cio.decide(
         false,
-        `${buildTaskPrompt('persona_brevity')}\n[LIGHT_PATH]\n${compressPersonaOutputsForCio([{ label: 'Ray', text: rayRes }], 900)}`,
+        `${buildTaskPrompt('persona_brevity')}\n[LIGHT_PATH]\n${compressPersonaOutputsForCio(
+          riskPeersLight.length ? riskPeersLight : [{ label: 'Risk', text: rayRes }],
+          900
+        )}${memDir('CIO') ? `\n\n[MEMORY]\n${truncateUtf8Chars(memDir('CIO'), 500)}` : ''}`,
         GEM_CIO_CAPS
       );
       assertActiveExecution(ex, 'portfolio:light:post_cio');
       const cioRes = normalizeProviderOutputForDiscord({ text: cioResRaw, provider: 'gemini', personaKey: 'CIO' });
       collectPartialResult(ex, 'Stanley Druckenmiller (CIO)', cioRes);
+      await notifyLightSeg('CIO', cioRes);
       ex?.setPerfMetrics({
         compressed_prompt_mode: 'aggressive_compressed',
         retry_mode_used: 'light_summary',
@@ -314,18 +764,58 @@ export async function runPortfolioDebateAppService(params: {
       const chatHistoryPayload: Record<string, unknown> = {
         user_id: userId,
         user_query: userQuery,
-        ray_advice: rayRes,
+        ray_advice: committeePlan.runRay ? rayRes : null,
         jyp_insight: null,
         simons_opportunity: null,
         drucker_decision: null,
         cio_decision: cioRes,
         jyp_weekly_report: null,
         summary: toOpinionSummary(cioRes, 900),
-        key_risks: toOpinionSummary(rayRes, 800),
+        key_risks: committeePlan.runHindenburg
+          ? toOpinionSummary(hindenburgRes, 1200)
+          : committeePlan.runRay
+            ? toOpinionSummary(rayRes, 800)
+            : null,
         key_actions: null
       };
       const chatHistoryId = await insertChatHistoryWithLegacyFallback(chatHistoryPayload, true);
       assertActiveExecution(ex, 'portfolio:light:post_insert');
+
+      const personaOutputsLight: Array<{
+        personaKey: PersonaKey;
+        personaName: string;
+        responseText: string;
+        providerName?: string;
+        modelName?: string;
+        estimatedCostUsd?: number;
+      }> = [];
+      if (committeePlan.runRay) {
+        personaOutputsLight.push({
+          personaKey: 'RAY',
+          personaName: personaKeyToPersonaName('RAY'),
+          responseText: rayRes,
+          providerName: 'gemini',
+          modelName: 'gemini-2.5-flash'
+        });
+      }
+      if (committeePlan.runHindenburg) {
+        personaOutputsLight.push({
+          personaKey: 'HINDENBURG',
+          personaName: personaKeyToPersonaName('HINDENBURG'),
+          responseText: hindenburgRes,
+          providerName: hindenburgGenLight.provider,
+          modelName: hindenburgGenLight.model,
+          estimatedCostUsd: hindenburgGenLight.estimated_cost_usd
+        });
+      }
+      personaOutputsLight.push({
+        personaKey: 'CIO',
+        personaName: personaKeyToPersonaName('CIO'),
+        responseText: cioRes,
+        providerName: 'gemini',
+        modelName: 'gemini-2.5-flash'
+      });
+
       if (chatHistoryId) {
         const baseContext = buildBaseAnalysisContext({
           discordUserId: userId,
@@ -335,40 +825,44 @@ export async function runPortfolioDebateAppService(params: {
           userProfile: profile,
           snapshotSummary: snapshot.summary,
           snapshotPositionsCount: snapshot.positions.length,
-          partialScope: undefined
+          partialScope: partialScopeFast || undefined
         });
         await runAnalysisPipeline({
           discordUserId: userId,
           chatHistoryId,
           analysisType,
-          personaOutputs: [
-            { personaKey: 'RAY', personaName: personaKeyToPersonaName('RAY'), responseText: rayRes, providerName: 'gemini', modelName: 'gemini-2.5-flash' },
-            { personaKey: 'CIO', personaName: personaKeyToPersonaName('CIO'), responseText: cioRes, providerName: 'gemini', modelName: 'gemini-2.5-flash' }
-          ],
+          personaOutputs: personaOutputsLight,
           baseContext
         });
       }
-      const orderedKeys: PersonaKey[] = ['RAY', 'CIO'];
-      const segments: PortfolioDebateSegment[] = [
-        {
-          key: 'RAY',
-          agentName: PORTFOLIO_SEGMENT_META.RAY!.agentName,
-          avatarUrl: PORTFOLIO_SEGMENT_META.RAY!.avatarUrl,
-          text: rayRes
-        },
-        {
-          key: 'CIO',
-          agentName: PORTFOLIO_SEGMENT_META.CIO!.agentName,
-          avatarUrl: PORTFOLIO_SEGMENT_META.CIO!.avatarUrl,
-          text: cioRes
-        }
-      ];
+      const orderedKeysLight: PersonaKey[] = ([] as PersonaKey[])
+        .concat(committeePlan.runRay ? (['RAY'] as const) : [])
+        .concat(committeePlan.runHindenburg ? (['HINDENBURG'] as const) : [])
+        .concat(['CIO'] as const);
+      const resultByKeyLight: Record<PersonaKey, string> = {
+        RAY: rayRes,
+        HINDENBURG: hindenburgRes,
+        SIMONS: '',
+        DRUCKER: '',
+        CIO: cioRes,
+        JYP: '',
+        TREND: '',
+        OPEN_TOPIC: '',
+        THIEL: '',
+        HOT_TREND: ''
+      };
+      const segmentsLight: PortfolioDebateSegment[] = [];
+      for (const k of orderedKeysLight) {
+        const meta = PORTFOLIO_SEGMENT_META[k];
+        if (!meta) continue;
+        segmentsLight.push({ key: k, agentName: meta.agentName, avatarUrl: meta.avatarUrl, text: resultByKeyLight[k] });
+      }
       return {
         status: 'ok',
         analysisType,
         chatHistoryId,
-        orderedKeys,
-        segments,
+        orderedKeys: orderedKeysLight,
+        segments: segmentsLight,
         decisionArtifact: null,
         feedbackCalibrationLine: null
       };
@@ -451,8 +945,15 @@ export async function runPortfolioDebateAppService(params: {
     }
     const styleDirectiveBlock = styleDirectives.length ? `\n\n[FAVORED_ANALYSIS_STYLES]\n${styleDirectives.join('\n')}` : '';
 
-    const preferredNamesForBias = profile.preferred_personas || [];
+    const preferredNamesForBias = (profile.preferred_personas || []).filter(
+      n => !EXCLUDED_FROM_PORTFOLIO_FINANCIAL_DISPLAY.has(n)
+    );
     const avoidedNamesForBias = profile.avoided_personas || [];
+    logPersonaSelectionPolicyApplied({
+      analysisType: 'portfolio_financial',
+      excluded_entertainment_from_bias: true,
+      preferred_count: preferredNamesForBias.length
+    });
     const personaBiasDirective = (k: PersonaKey) => {
       const n = personaKeyToPersonaName(k);
       const isPreferred = preferredNamesForBias.includes(n);
@@ -490,6 +991,41 @@ export async function runPortfolioDebateAppService(params: {
     const druckerMemory = memoryByKey.get('DRUCKER') ?? '';
     const cioMemory = memoryByKey.get('CIO') ?? '';
 
+    logRouteFamilyLocked({
+      routeFamily: analysisTypeToRouteFamily(analysisType),
+      analysisType,
+      discordUserId: userId
+    });
+    logPersonaGroupSelected({
+      analysisType,
+      personaGroup: 'FINANCIAL',
+      discordUserId: userId,
+      note: 'trend_k_culture_personas_excluded_by_policy'
+    });
+
+    const signalHintsFull = await loadPersonaWeightSignalHints(userId);
+    const weightMeta = computeFinancialPersonaWeights({
+      userId,
+      profile,
+      memories: {
+        RAY: personaMemoryByKey.get('RAY') ?? null,
+        HINDENBURG: personaMemoryByKey.get('HINDENBURG') ?? null,
+        SIMONS: personaMemoryByKey.get('SIMONS') ?? null,
+        DRUCKER: personaMemoryByKey.get('DRUCKER') ?? null,
+        CIO: personaMemoryByKey.get('CIO') ?? null
+      },
+      signalHints: signalHintsFull,
+      observability: { analysisType, routeFamily: 'financial' }
+    });
+    const committeePlan = buildFinancialCommitteePlan({
+      userId,
+      analysisType,
+      profile,
+      weightMeta,
+      runMode: 'full'
+    });
+    const SK = COMMITTEE_SKIPPED_PLACEHOLDER;
+
     const precomputedDruckerPreamble = `${personaBiasDirective('DRUCKER')}${styleDirectiveBlock}\n${buildTaskPrompt('persona_brevity')}`;
     const precomputedCioStyleBlock = `${personaBiasDirective('CIO')}${styleDirectiveBlock}`;
     const advisoryOnlyLine = '[ADVISORY_ONLY] 자동 주문·자동 매매 없음. 조언·정보 목적.';
@@ -516,7 +1052,7 @@ export async function runPortfolioDebateAppService(params: {
       await cb({ key, agentName: m.agentName, avatarUrl: m.avatarUrl, text });
     };
 
-    const rayPromise = (async () => {
+    const runRayExec = async (): Promise<string> => {
       const t0 = Date.now();
       const rq = `${compressedBase}\n\n${buildPersonaContext({
         personaKey: 'RAY',
@@ -527,23 +1063,23 @@ export async function runPortfolioDebateAppService(params: {
       assertActiveExecution(ex, 'portfolio:pre_ray');
       const rayResRaw = await ray.analyze(rq, false, GEM_PERSONA_CAPS);
       assertActiveExecution(ex, 'portfolio:post_ray');
-      const rayRes = normalizeProviderOutputForDiscord({ text: rayResRaw, provider: 'gemini', personaKey: 'RAY' });
-      collectPartialResult(ex, 'Ray Dalio (PB)', rayRes);
+      const out = normalizeProviderOutputForDiscord({ text: rayResRaw, provider: 'gemini', personaKey: 'RAY' });
+      collectPartialResult(ex, 'Ray Dalio (PB)', out);
       logger.info('AI_PERF', 'persona_execution_time', {
         persona: 'RAY',
         ms: Date.now() - t0,
-        parallel_execution_used: true,
+        parallel_execution_used: committeePlan.runHindenburg,
         compressed_prompt_used: true,
         model_used: 'gemini-2.5-flash',
         prompt_token_estimate: estimateTokensApprox(rq.length)
       });
-      if (!rayRes?.includes('[REASON: NO_DATA]')) {
-        await notifySeg('RAY', rayRes);
+      if (!out?.includes('[REASON: NO_DATA]')) {
+        await notifySeg('RAY', out);
       }
-      return rayRes;
-    })();
+      return out;
+    };
 
-    const hindPromise = (async () => {
+    const runHindExec = async (): Promise<{ hindenburgGen: ProviderGenerationResult; hindenburgRes: string }> => {
       const t0 = Date.now();
       const hq = `${compressedBase}\n\n${buildPersonaContext({
         personaKey: 'HINDENBURG',
@@ -560,7 +1096,7 @@ export async function runPortfolioDebateAppService(params: {
         aiExecution: ex ?? undefined,
         taskType: 'PERSONA_ANALYSIS',
         generation: OPENAI_PERSONA_CAPS,
-        parallel_execution_used: true,
+        parallel_execution_used: committeePlan.runRay,
         compressed_prompt_used: true,
         fallbackToGemini: async () => asGeminiResult(await hindenburg.analyze(hq, false, GEM_PERSONA_CAPS))
       });
@@ -574,7 +1110,7 @@ export async function runPortfolioDebateAppService(params: {
       logger.info('AI_PERF', 'persona_execution_time', {
         persona: 'HINDENBURG',
         ms: Date.now() - t0,
-        parallel_execution_used: true,
+        parallel_execution_used: committeePlan.runRay,
         compressed_prompt_used: true,
         model_used: hindGen.model,
         prompt_token_estimate: estimateTokensApprox(hq.length),
@@ -582,92 +1118,131 @@ export async function runPortfolioDebateAppService(params: {
       });
       await notifySeg('HINDENBURG', hindRes);
       return { hindenburgGen: hindGen, hindenburgRes: hindRes };
-    })();
+    };
 
     const tParallelWallStart = Date.now();
-    const [rayOutcome, hindOutcome] = await Promise.allSettled([rayPromise, hindPromise]);
-    const persona_parallel_wall_time_ms = Date.now() - tParallelWallStart;
-
-    if (rayOutcome.status === 'rejected') {
-      throw rayOutcome.reason;
-    }
-    const rayRes = rayOutcome.value;
-    if (rayRes?.includes('[REASON: NO_DATA]')) {
-      logger.warn('AI', 'Ray Dalio aborted due to NO_DATA at logic layer');
-      return { status: 'aborted_silent' };
-    }
-
+    let persona_parallel_wall_time_ms = 0;
+    let rayRes: string;
     let hindenburgGen: ProviderGenerationResult;
     let hindenburgRes: string;
-    if (hindOutcome.status === 'fulfilled') {
-      hindenburgGen = hindOutcome.value.hindenburgGen;
-      hindenburgRes = hindOutcome.value.hindenburgRes;
+
+    if (committeePlan.runRay && committeePlan.runHindenburg) {
+      const [rayOutcome, hindOutcome] = await Promise.allSettled([runRayExec(), runHindExec()]);
+      persona_parallel_wall_time_ms = Date.now() - tParallelWallStart;
+      if (rayOutcome.status === 'rejected') {
+        throw rayOutcome.reason;
+      }
+      rayRes = rayOutcome.value;
+      if (rayRes?.includes('[REASON: NO_DATA]')) {
+        logger.warn('AI', 'Ray Dalio aborted due to NO_DATA at logic layer');
+        return { status: 'aborted_silent' };
+      }
+      if (hindOutcome.status === 'fulfilled') {
+        hindenburgGen = hindOutcome.value.hindenburgGen;
+        hindenburgRes = hindOutcome.value.hindenburgRes;
+      } else {
+        logger.warn('AI', 'hindenburg_parallel_failed', { message: String(hindOutcome.reason) });
+        hindenburgRes = '[HINDENBURG: 응답 생성 실패 — 생략]';
+        hindenburgGen = { text: hindenburgRes, provider: 'gemini', model: 'error-placeholder' };
+        collectPartialResult(ex, 'HINDENBURG_ANALYST', hindenburgRes);
+        await notifySeg('HINDENBURG', hindenburgRes);
+      }
+      logger.info('AI_PERF', 'parallel_ray_hindenburg_window_ms', {
+        persona_parallel_wall_time_ms,
+        parallel_execution_used: true,
+        compressed_prompt_mode: 'standard_compressed'
+      });
+    } else if (committeePlan.runRay) {
+      rayRes = await runRayExec();
+      if (rayRes?.includes('[REASON: NO_DATA]')) {
+        logger.warn('AI', 'Ray Dalio aborted due to NO_DATA at logic layer');
+        return { status: 'aborted_silent' };
+      }
+      hindenburgRes = SK('HINDENBURG_ANALYST');
+      hindenburgGen = { text: hindenburgRes, provider: 'gemini', model: 'committee-skip' };
+      persona_parallel_wall_time_ms = Date.now() - tParallelWallStart;
+      logger.info('AI_PERF', 'parallel_ray_hindenburg_window_ms', {
+        persona_parallel_wall_time_ms,
+        parallel_execution_used: false,
+        compressed_prompt_mode: 'standard_compressed'
+      });
+    } else if (committeePlan.runHindenburg) {
+      rayRes = SK('Ray Dalio (PB)');
+      try {
+        const h = await runHindExec();
+        hindenburgGen = h.hindenburgGen;
+        hindenburgRes = h.hindenburgRes;
+      } catch (e: any) {
+        logger.warn('AI', 'hindenburg_only_failed', { message: e?.message || String(e) });
+        hindenburgRes = '[HINDENBURG: 응답 생성 실패 — 생략]';
+        hindenburgGen = { text: hindenburgRes, provider: 'gemini', model: 'error-placeholder' };
+        collectPartialResult(ex, 'HINDENBURG_ANALYST', hindenburgRes);
+        await notifySeg('HINDENBURG', hindenburgRes);
+      }
+      persona_parallel_wall_time_ms = Date.now() - tParallelWallStart;
+      logger.info('AI_PERF', 'parallel_ray_hindenburg_window_ms', {
+        persona_parallel_wall_time_ms,
+        parallel_execution_used: false,
+        compressed_prompt_mode: 'standard_compressed'
+      });
     } else {
-      logger.warn('AI', 'hindenburg_parallel_failed', { message: String(hindOutcome.reason) });
-      hindenburgRes = '[HINDENBURG: 응답 생성 실패 — 생략]';
-      hindenburgGen = { text: hindenburgRes, provider: 'gemini', model: 'error-placeholder' };
-      collectPartialResult(ex, 'HINDENBURG_ANALYST', hindenburgRes);
-      await notifySeg('HINDENBURG', hindenburgRes);
+      rayRes = SK('Ray Dalio (PB)');
+      hindenburgRes = SK('HINDENBURG_ANALYST');
+      hindenburgGen = { text: hindenburgRes, provider: 'gemini', model: 'committee-skip' };
+      persona_parallel_wall_time_ms = Date.now() - tParallelWallStart;
+      logger.warn('COMMITTEE', 'risk_seat_fallback_both_skipped', { committeePlan });
     }
 
-    logger.info('AI_PERF', 'parallel_ray_hindenburg_window_ms', {
-      persona_parallel_wall_time_ms,
-      parallel_execution_used: true,
-      compressed_prompt_mode: 'standard_compressed'
-    });
+    const riskPeers: { label: string; text: string }[] = [];
+    if (committeePlan.runRay) riskPeers.push({ label: 'Ray', text: rayRes });
+    if (committeePlan.runHindenburg) riskPeers.push({ label: 'Hindenburg', text: hindenburgRes });
+    const peerForSimons = compressPersonaOutputsForCio(riskPeers.length ? riskPeers : [{ label: 'Risk', text: rayRes }], 420);
 
-    const simonsQuery = `${compressedBase}\n\n${buildPersonaContext({
-      personaKey: 'SIMONS',
-      personaBiasDirective: personaBiasDirective('SIMONS'),
-      memoryDirective: simonsMemory,
-      compressionMode: 'standard_compressed'
-    })}\n\n${buildTaskPrompt('persona')}`;
-    const peerForSimons = compressPersonaOutputsForCio(
-      [
-        { label: 'Ray', text: rayRes },
-        { label: 'Hindenburg', text: hindenburgRes }
-      ],
-      420
-    );
+    let simonsGen: ProviderGenerationResult;
+    let simonsRes: string;
+    if (committeePlan.runSimons) {
+      const simonsQuery = `${compressedBase}\n\n${buildPersonaContext({
+        personaKey: 'SIMONS',
+        personaBiasDirective: personaBiasDirective('SIMONS'),
+        memoryDirective: simonsMemory,
+        compressionMode: 'standard_compressed'
+      })}\n\n${buildTaskPrompt('persona')}`;
+      assertActiveExecution(ex, 'portfolio:pre_simons');
+      const tSim = Date.now();
+      simonsGen = await generateWithPersonaProvider({
+        discordUserId: userId,
+        personaKey: 'SIMONS',
+        personaName: personaKeyToPersonaName('SIMONS'),
+        prompt: simonsQuery,
+        aiExecution: ex ?? undefined,
+        taskType: 'PERSONA_ANALYSIS',
+        generation: OPENAI_PERSONA_CAPS,
+        compressed_prompt_used: true,
+        fallbackToGemini: async () =>
+          asGeminiResult(await simons.strategize(simonsQuery, false, peerForSimons, GEM_PERSONA_CAPS))
+      });
+      assertActiveExecution(ex, 'portfolio:post_simons');
+      simonsRes = normalizeProviderOutputForDiscord({
+        text: simonsGen.text,
+        provider: simonsGen.provider,
+        personaKey: 'SIMONS'
+      });
+      collectPartialResult(ex, 'James Simons (Quant)', simonsRes);
+      logger.info('AI_PERF', 'persona_execution_time', {
+        persona: 'SIMONS',
+        ms: Date.now() - tSim,
+        parallel_execution_used: false,
+        model_used: simonsGen.model,
+        prompt_token_estimate: estimateTokensApprox(simonsQuery.length)
+      });
+      await notifySeg('SIMONS', simonsRes);
+    } else {
+      simonsRes = SK('James Simons (Quant)');
+      simonsGen = { text: simonsRes, provider: 'gemini', model: 'committee-skip' };
+    }
 
-    assertActiveExecution(ex, 'portfolio:pre_simons');
-    const tSim = Date.now();
-    const simonsGen = await generateWithPersonaProvider({
-      discordUserId: userId,
-      personaKey: 'SIMONS',
-      personaName: personaKeyToPersonaName('SIMONS'),
-      prompt: simonsQuery,
-      aiExecution: ex ?? undefined,
-      taskType: 'PERSONA_ANALYSIS',
-      generation: OPENAI_PERSONA_CAPS,
-      compressed_prompt_used: true,
-      fallbackToGemini: async () =>
-        asGeminiResult(await simons.strategize(simonsQuery, false, peerForSimons, GEM_PERSONA_CAPS))
-    });
-    assertActiveExecution(ex, 'portfolio:post_simons');
-    const simonsRes = normalizeProviderOutputForDiscord({
-      text: simonsGen.text,
-      provider: simonsGen.provider,
-      personaKey: 'SIMONS'
-    });
-    collectPartialResult(ex, 'James Simons (Quant)', simonsRes);
-    logger.info('AI_PERF', 'persona_execution_time', {
-      persona: 'SIMONS',
-      ms: Date.now() - tSim,
-      parallel_execution_used: false,
-      model_used: simonsGen.model,
-      prompt_token_estimate: estimateTokensApprox(simonsQuery.length)
-    });
-    await notifySeg('SIMONS', simonsRes);
-
-    const druckerCombinedLog = `${precomputedDruckerPreamble}\n${compressPersonaOutputsForCio(
-      [
-        { label: 'Ray', text: rayRes },
-        { label: 'Hindenburg', text: hindenburgRes },
-        { label: 'Simons', text: simonsRes }
-      ],
-      340
-    )}${druckerMemory ? `\n\n[MEMORY]\n${truncateUtf8Chars(druckerMemory, 900)}` : ''}`;
+    const druckerPeers = [...riskPeers, ...(committeePlan.runSimons ? [{ label: 'Simons', text: simonsRes }] : [])];
+    const druckerCombinedLog = `${precomputedDruckerPreamble}\n${compressPersonaOutputsForCio(druckerPeers, 340)}${druckerMemory ? `\n\n[MEMORY]\n${truncateUtf8Chars(druckerMemory, 900)}` : ''}`;
     assertActiveExecution(ex, 'portfolio:pre_drucker');
     const tDr = Date.now();
     const druckerResRaw = await drucker.summarizeAndGenerateActions(false, druckerCombinedLog, GEM_PERSONA_CAPS);
@@ -682,7 +1257,12 @@ export async function runPortfolioDebateAppService(params: {
     });
     await notifySeg('DRUCKER', druckerRes);
 
-    const preCioPersonas: PersonaKey[] = ['RAY', 'HINDENBURG', 'SIMONS', 'DRUCKER'];
+    const preCioPersonas: PersonaKey[] = (['RAY', 'HINDENBURG', 'SIMONS', 'DRUCKER'] as PersonaKey[]).filter(k => {
+      if (k === 'RAY') return committeePlan.runRay;
+      if (k === 'HINDENBURG') return committeePlan.runHindenburg;
+      if (k === 'SIMONS') return committeePlan.runSimons;
+      return true;
+    });
     const feedbackSignals: FeedbackDecisionSignal[] = [];
     const segmentText: Record<PersonaKey, string> = {
       RAY: rayRes,
@@ -698,12 +1278,15 @@ export async function runPortfolioDebateAppService(params: {
     };
     for (const pk of preCioPersonas) {
       const pn = personaKeyToPersonaName(pk);
-      const pm = personaMemoryByKey.get(pk)!;
-      const extracted = extractClaimsByContract({
-        responseText: segmentText[pk],
-        analysisType,
-        personaName: pn
-      });
+      const pm = personaMemoryByKey.get(pk) ?? ({} as PersonaMemory);
+      const segTxt = segmentText[pk] || '';
+      const extracted: ClaimExtractionResult = isCommitteeSkippedPlaceholderResponse(segTxt)
+        ? { claims: [], fallbackUsed: false }
+        : extractClaimsByContract({
+            responseText: segTxt,
+            analysisType,
+            personaName: pn
+          });
       feedbackSignals.push(
         buildFeedbackDecisionSignal({
           discordUserId: userId,
@@ -719,15 +1302,7 @@ export async function runPortfolioDebateAppService(params: {
     const feedbackAdjustmentMetaForCio = aggregateFeedbackAdjustmentMeta(feedbackSignals, analysisType);
     const feedbackCalibrationLine = buildFeedbackCalibrationDiscordLine(feedbackSignals);
 
-    const cioBodyCore = compressPersonaOutputsForCio(
-      [
-        { label: 'Ray', text: rayRes },
-        { label: 'Hindenburg', text: hindenburgRes },
-        { label: 'Simons', text: simonsRes },
-        { label: 'Drucker', text: druckerRes }
-      ],
-      280
-    );
+    const cioBodyCore = compressPersonaOutputsForCio([...druckerPeers, { label: 'Drucker', text: druckerRes }], 280);
     let cioCombinedLog = `${precomputedCioStyleBlock}\n${buildTaskPrompt('cio')}\n[CIO_INPUT]\n${cioBodyCore}`;
     if (cioMemory) {
       cioCombinedLog += `\n\n[MEMORY]\n${truncateUtf8Chars(cioMemory, 800)}`;
@@ -740,7 +1315,8 @@ export async function runPortfolioDebateAppService(params: {
     const cioResRaw = await cio.decide(false, cioCombinedLog, GEM_CIO_CAPS);
     assertActiveExecution(ex, 'portfolio:post_cio');
     const cio_stage_time_ms = Date.now() - tCio;
-    const cioRes = normalizeProviderOutputForDiscord({ text: cioResRaw, provider: 'gemini', personaKey: 'CIO' });
+    const cioResBase = normalizeProviderOutputForDiscord({ text: cioResRaw, provider: 'gemini', personaKey: 'CIO' });
+    const cioRes = `${cioResBase}\n\n_이번 분석은 금융 위원회 기준으로, 가중치·정책에 따른 위원 구성으로 진행했습니다._`;
     collectPartialResult(ex, 'Stanley Druckenmiller (CIO)', cioRes);
     logger.info('AI_PERF', 'persona_execution_time', {
       persona: 'CIO',
@@ -774,9 +1350,68 @@ export async function runPortfolioDebateAppService(params: {
       retry_mode_used: 'none'
     });
 
-    const preferredNames = profile.preferred_personas || [];
+    const personaOutputsForPipeline = [
+      ...(committeePlan.runRay
+        ? [
+            {
+              personaKey: 'RAY' as const,
+              personaName: personaKeyToPersonaName('RAY'),
+              responseText: rayRes,
+              providerName: 'gemini',
+              modelName: 'gemini-2.5-flash'
+            }
+          ]
+        : []),
+      ...(committeePlan.runHindenburg
+        ? [
+            {
+              personaKey: 'HINDENBURG' as const,
+              personaName: personaKeyToPersonaName('HINDENBURG'),
+              responseText: hindenburgRes,
+              providerName: hindenburgGen.provider,
+              modelName: hindenburgGen.model,
+              estimatedCostUsd: hindenburgGen.estimated_cost_usd
+            }
+          ]
+        : []),
+      ...(committeePlan.runSimons
+        ? [
+            {
+              personaKey: 'SIMONS' as const,
+              personaName: personaKeyToPersonaName('SIMONS'),
+              responseText: simonsRes,
+              providerName: simonsGen.provider,
+              modelName: simonsGen.model,
+              estimatedCostUsd: simonsGen.estimated_cost_usd
+            }
+          ]
+        : []),
+      {
+        personaKey: 'DRUCKER' as const,
+        personaName: personaKeyToPersonaName('DRUCKER'),
+        responseText: druckerRes,
+        providerName: 'gemini',
+        modelName: 'gemini-2.5-flash'
+      },
+      {
+        personaKey: 'CIO' as const,
+        personaName: personaKeyToPersonaName('CIO'),
+        responseText: cioRes,
+        providerName: 'gemini',
+        modelName: 'gemini-2.5-flash'
+      }
+    ];
+
+    const preferredNames = (profile.preferred_personas || []).filter(
+      n => !EXCLUDED_FROM_PORTFOLIO_FINANCIAL_DISPLAY.has(n)
+    );
     const avoidedNames = profile.avoided_personas || [];
-    const keyOrder: PersonaKey[] = ['HINDENBURG', 'RAY', 'SIMONS', 'DRUCKER', 'CIO'];
+    const keyOrder: PersonaKey[] = (['HINDENBURG', 'RAY', 'SIMONS', 'DRUCKER', 'CIO'] as PersonaKey[]).filter(k => {
+      if (k === 'RAY') return committeePlan.runRay;
+      if (k === 'HINDENBURG') return committeePlan.runHindenburg;
+      if (k === 'SIMONS') return committeePlan.runSimons;
+      return true;
+    });
     const scoreForKey = (k: PersonaKey) => {
       const n = personaKeyToPersonaName(k);
       const pi = preferredNames.indexOf(n);
@@ -839,27 +1474,7 @@ export async function runPortfolioDebateAppService(params: {
         chatHistoryId,
         analysisType,
         feedbackAdjustmentMetaForCio,
-        personaOutputs: [
-          { personaKey: 'RAY', personaName: personaKeyToPersonaName('RAY'), responseText: rayRes, providerName: 'gemini', modelName: 'gemini-2.5-flash' },
-          {
-            personaKey: 'HINDENBURG',
-            personaName: personaKeyToPersonaName('HINDENBURG'),
-            responseText: hindenburgRes,
-            providerName: hindenburgGen.provider,
-            modelName: hindenburgGen.model,
-            estimatedCostUsd: hindenburgGen.estimated_cost_usd
-          },
-          {
-            personaKey: 'SIMONS',
-            personaName: personaKeyToPersonaName('SIMONS'),
-            responseText: simonsRes,
-            providerName: simonsGen.provider,
-            modelName: simonsGen.model,
-            estimatedCostUsd: simonsGen.estimated_cost_usd
-          },
-          { personaKey: 'DRUCKER', personaName: personaKeyToPersonaName('DRUCKER'), responseText: druckerRes, providerName: 'gemini', modelName: 'gemini-2.5-flash' },
-          { personaKey: 'CIO', personaName: personaKeyToPersonaName('CIO'), responseText: cioRes, providerName: 'gemini', modelName: 'gemini-2.5-flash' }
-        ],
+        personaOutputs: personaOutputsForPipeline,
         baseContext
       });
     }
@@ -874,13 +1489,11 @@ export async function runPortfolioDebateAppService(params: {
           discordUserId: userId,
           chatHistoryId,
           analysisType,
-          personaOutputs: [
-            { personaKey: 'RAY', personaName: personaKeyToPersonaName('RAY'), responseText: rayRes },
-            { personaKey: 'HINDENBURG', personaName: personaKeyToPersonaName('HINDENBURG'), responseText: hindenburgRes },
-            { personaKey: 'SIMONS', personaName: personaKeyToPersonaName('SIMONS'), responseText: simonsRes },
-            { personaKey: 'DRUCKER', personaName: personaKeyToPersonaName('DRUCKER'), responseText: druckerRes },
-            { personaKey: 'CIO', personaName: personaKeyToPersonaName('CIO'), responseText: cioRes }
-          ],
+          personaOutputs: personaOutputsForPipeline.map(p => ({
+            personaKey: p.personaKey,
+            personaName: p.personaName,
+            responseText: p.responseText
+          })),
           snapshotSummary: {
             position_count: snapshot.summary.position_count,
             top3_weight_pct: snapshot.summary.top3_weight_pct,

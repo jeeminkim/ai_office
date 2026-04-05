@@ -44,6 +44,15 @@ pm2 restart ai-office
 - `logs/boot/boot.log_YYYYMMDD`
 - `logs/llm/llm.log_YYYYMMDD`
 
+### 페르소나·분석 모드 정책 (Discord)
+
+- **그룹 하드 분리**: 금융 위원회(Ray·Hindenburg·Simons·Drucker·CIO)와 트렌드·K-culture(JYP·전현무·손흥민·김은희 등)는 **서로 다른 라우트 패밀리**에만 배치된다(`personaRoutePolicy.ts`). 교차 참여 시 `PERSONA_HARD_EXCLUDED`.
+- **포트폴리오 금융(`portfolio_*`)**: K-culture 표시명은 선호·바이어스에서 제외. 위원 **가중치**(`PERSONA_WEIGHT_APPLIED`, `recentFeedbackSummary`·`recentAccuracyHint`·`routeFamily`)·**구성**(`COMMITTEE_COMPOSITION_BUILT`, `runMode`·`selectedPersonas`·`runDrucker`)으로 Ray/Hind/Simons 일부 생략 가능. 경량 **`light_summary`**·**`retry_summary`**(타임아웃 포트폴리오 「요약만 다시」)도 동일 엔진; **`short_summary`**는 CIO 단독+가중치 로깅.
+- **트렌드(`trend_*`)**: `TREND_TOPIC_CONFIG` 전담만. `PERSONA_GROUP_SELECTED`, `ROUTE_FAMILY_LOCKED`. 금융 위원회 미개입.
+- **오픈 토픽**: `OPEN_TOPIC_CLASSIFIED` → `open_topic_financial` \| `open_topic_trend` \| `open_topic_general`. 트렌드 오픈은 JYP 계열만; 금융 오픈은 Ray/Simons/Drucker/CIO만. **모호/일반**이면 `OPEN_TOPIC_AMBIGUOUS_DETECTED` 후 사용자 관점 선택(`OPEN_TOPIC_VIEW_SELECTED`). `PERSONA_SELECTION_POLICY_APPLIED`.
+- **라우트 락**: `ROUTE_LOCKED`, `ROUTE_FAMILY_LOCKED`, `ROUTE_OVERRIDE_BLOCKED`.
+- **메뉴 UX**: `MENU_RENDERED_NEW_MESSAGE` — `!메뉴`가 새 메시지로 패널을 렌더했는지 확인.
+
 ### 빠른 확인 포인트
 - LLM fallback: `LLM_PROVIDER` scope
 - quote 장애: `QUOTE` scope (`classifiedReason`, `failureBreakdown`, `traceId`)

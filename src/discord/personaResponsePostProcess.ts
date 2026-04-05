@@ -59,5 +59,8 @@ export function postProcessPersonaOutputForDiscord(text: string): string {
   let t = String(text || '').replace(/\r\n/g, '\n');
   t = maybeAppendHumanFriendlyExplanation(t);
   t = ensureCompleteResponse(t);
-  return t;
+  if (t.length < 80 && !/추가 분석 필요/.test(t)) {
+    t = `${t.trim()}\n\n→ 핵심 요약: 현재 정보가 부족하므로 추가 분석 필요`;
+  }
+  return t.trim();
 }

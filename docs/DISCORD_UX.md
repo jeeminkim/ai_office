@@ -6,6 +6,7 @@ Discord에서 사용자가 보는 **메인 패널·버튼·follow-up·응답 후
 
 - 메인/서브 패널 구성·복구는 `panelManager.ts`, 상태 파일 `state/discord-panel.json`.
 - 텍스트 명령(`!메뉴`, `!패널재설치`, `!토론` 등)은 `handleMessageCreate`(`src/discord/handlers/messageCreate.ts`).
+- **`!메뉴`**: 기존 패널 메시지를 **편집하지 않고** 항상 **새 채널 메시지**로 메인 패널을 보낸다(`content`: «다음 메뉴를 선택하세요», `getMainPanel()`의 embed·components). 상태 파일 `state/discord-panel.json`은 **새 메시지 id**로 갱신된다. 로그: `MENU_RENDERED_NEW_MESSAGE`. (`!패널재설치`는 기존처럼 저장된 메시지 **edit** 우선.)
 - 패널 복구 시 채널이 비어 있으면 `DISCORD_MAIN_PANEL_CHANNEL_ID` 또는 `DEFAULT_CHANNEL_ID`로 폴백 후 재생성 — 로그 `PANEL restore *`, **docs/TROUBLESHOOTING.md** 참고.
 
 ## 포트폴리오 / 트렌드 / 데이터센터 / 설정
@@ -46,15 +47,21 @@ Discord에서 사용자가 보는 **메인 패널·버튼·follow-up·응답 후
 - `isDecisionPrompt`가 아닐 때 질문이 있으면 버튼·String Select·모달로 응답을 강제(`followupPromptService.ts`).
 - 스냅샷: `followup_snapshots`, `customId`는 `followup:select|*`, `followup:menu|*`, `followup:input|*`, `modal:followup:*` 등.
 - 선택 후 포트폴리오/오픈토픽/트렌드로 이어진다. **dead-end 없음**, **자동 매매 없음**. 로그 `FOLLOWUP_PROMPT_DETECTED` 등.
+- **오픈 토픽 관점 선택**: 분류가 모호하면 `analysis_type=open_topic_ambiguous_view` 스냅샷 + `[금융 관점으로 보기]` 등 버튼 → `runOpenTopicDebate`에 `forcedOpenTopicView` 전달. 로그 `OPEN_TOPIC_AMBIGUOUS_DETECTED`, `OPEN_TOPIC_VIEW_SELECTED`.
 - SQL: `docs/sql/followup_snapshots.sql`.
 
 ## 페르소나 응답 후처리
 
 - `postProcessPersonaOutputForDiscord`, `ensureCompleteResponse` — 기술 기호 시 쉬운 설명 보강, 미완결 문장 정리.
 
+## 페르소나 그룹·오픈 토픽·짧은 안내 문구
+
+- **금융 위원회**와 **트렌드·K-culture**는 서로 다른 Discord 실행 경로에서만 돌아간다. 포트폴리오 토론 응답 말미에 *“금융 위원회 기준·가중치 위원 구성”* 한 줄이 붙을 수 있다. 트렌드·오픈 토픽(분류된 경우) 첫 메시지에 *트렌드* 또는 *금융·실행(오픈 토픽)* 관점 한 줄이 붙을 수 있다 — 내부 가중치를 장황히 노출하지 않는다.
+- 오픈 토픽은 `open_topic_financial` / `open_topic_trend` / `open_topic_general`로 분류되며, JYP 기본 폴백은 **트렌드 오픈**에만 해당한다. 모호하면 금융으로 **자동 고정하지 않고** follow-up으로 관점을 고른다.
+
 ## 타임아웃 재시도 버튼
 
-- 분석 타임아웃 시 부분 요약 + `timeout:retry:light:*` 등 버튼. 스냅샷은 `timeout_retry_snapshots`(또는 메모리 폴백). 상세는 **docs/ANALYSIS_PIPELINE.md**, 운영 로그 키는 **docs/OPERATIONS.md** §3.1.
+- 분석 타임아웃 시 부분 요약 + `timeout:retry:light:*` 등 버튼. 스냅샷은 `timeout_retry_snapshots`(또는 메모리 폴백). **포트폴리오** 「요약만 다시」는 내부적으로 **`retry_summary`**(리스크+COO+CIO); 오픈 토픽은 기존처럼 경량/짧은 요약 `fastMode` 유지. 상세는 **docs/ANALYSIS_PIPELINE.md**, 운영 로그 키는 **docs/OPERATIONS.md** §3.1.
 
 ## Feedback → 소프트 보정(포트폴리오, 제한적)
 

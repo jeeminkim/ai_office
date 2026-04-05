@@ -104,8 +104,8 @@ export function getTimeoutButtonRoutes(): InteractionRoute[] {
           content: `**${modeLabel}로 다시 실행합니다.** _(자동 주문 없음)_`
         });
 
-        const portfolioFast = parsed.kind === 'light' ? 'light_summary' : 'short_summary';
-        const openFast = portfolioFast;
+        const portfolioFast = parsed.kind === 'light' ? 'light_summary' : 'retry_summary';
+        const openFast = parsed.kind === 'light' ? 'light_summary' : 'short_summary';
 
         try {
           switch (pending.route) {

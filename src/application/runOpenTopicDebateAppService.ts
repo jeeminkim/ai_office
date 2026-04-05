@@ -20,12 +20,25 @@ import {
   personaKeyToPersonaName,
   toOpinionSummary
 } from '../discord/analysisFormatting';
+import {
+  K_CULTURE_DISPLAY_NAMES,
+  classifyOpenTopicQuery,
+  displayNameToFinancialOpenPersonaKey,
+  displayNameToTrendOpenPersonaKey,
+  getPersonaGroupForRoute,
+  logOpenTopicClassified,
+  logPersonaGroupSelected,
+  logPersonaHardExcluded,
+  logPersonaSelectionPolicyApplied,
+  resolveOpenTopicAnalysisType
+} from '../discord/personaSelectionPolicy';
 import type { AiExecutionHandle } from '../discord/aiExecution/aiExecutionHandle';
 import { assertActiveExecution } from '../discord/aiExecution/aiExecutionAbort';
 import { collectPartialResult } from '../discord/aiExecution/aiExecutionHelpers';
 import type { AgentGenCaps } from '../../analysisTypes';
 import { getModelForTask } from '../../llmProviderService';
 import { buildOpenTopicBaseContext, buildPersonaContext, buildTaskPrompt } from './promptCompressionPortfolio';
+import type { OpenTopicKind } from '../policies/personaRoutePolicy';
 
 const OPEN_TOPIC_GEM: AgentGenCaps = { maxOutputTokens: 420, temperature: 0.38 };
 
@@ -36,11 +49,18 @@ export type OpenTopicBroadcast = {
   text: string;
 };
 
-export type RunOpenTopicDebateAppResult = {
-  analysisType: string;
-  chatHistoryId: number | null;
-  broadcasts: OpenTopicBroadcast[];
-};
+export type RunOpenTopicDebateAppResult =
+  | {
+      status: 'ambiguous_pick';
+      userQuery: string;
+      classifiedKind: OpenTopicKind;
+    }
+  | {
+      status: 'ok';
+      analysisType: string;
+      chatHistoryId: number | null;
+      broadcasts: OpenTopicBroadcast[];
+    };
 
 export async function runOpenTopicDebateAppService(params: {
   userId: string;
@@ -48,6 +68,8 @@ export async function runOpenTopicDebateAppService(params: {
   loadUserMode: (id: string) => Promise<'SAFE' | 'BALANCED' | 'AGGRESSIVE'>;
   execution?: AiExecutionHandle | null;
   fastMode?: 'none' | 'light_summary' | 'short_summary';
+  /** followup 스냅샷에서 관점 확정 시 — 모호 분기 생략 */
+  forcedOpenTopicView?: 'financial' | 'trend' | 'general';
   /** 페르소나 완료 시 즉시 UI 전송(최종 루프에서 스킵) */
   onPersonaReady?: (b: OpenTopicBroadcast) => void | Promise<void>;
 }): Promise<RunOpenTopicDebateAppResult> {
@@ -66,6 +88,71 @@ export async function runOpenTopicDebateAppService(params: {
     preferred_personas: profile.preferred_personas
   });
 
+  const classified = classifyOpenTopicQuery(userQuery);
+  let kind = classified.kind;
+  let ambiguous = classified.ambiguous;
+  if (params.forcedOpenTopicView) {
+    kind = params.forcedOpenTopicView;
+    ambiguous = false;
+  }
+
+  const fast = params.fastMode ?? 'none';
+  if (ambiguous && !params.forcedOpenTopicView && fast === 'none') {
+    logger.info('OPEN_TOPIC', 'OPEN_TOPIC_AMBIGUOUS_DETECTED', {
+      discordUserId: userId,
+      classifiedKind: classified.kind,
+      ambiguous: classified.ambiguous
+    });
+    return { status: 'ambiguous_pick', userQuery, classifiedKind: classified.kind };
+  }
+
+  const resolvedAnalysisType = resolveOpenTopicAnalysisType(kind);
+  logOpenTopicClassified({
+    kind,
+    ambiguous,
+    resolvedAnalysisType,
+    discordUserId: userId
+  });
+  ex?.lockAnalysisRoute(resolvedAnalysisType);
+
+  const topicHint: 'financial' | 'trend' | 'general' =
+    kind === 'trend' ? 'trend' : kind === 'financial' ? 'financial' : 'general';
+  const personaGroup = getPersonaGroupForRoute(resolvedAnalysisType, topicHint);
+  logPersonaGroupSelected({
+    analysisType: resolvedAnalysisType,
+    personaGroup,
+    routeFamily: 'open_topic',
+    discordUserId: userId
+  });
+
+  for (const nm of profile.preferred_personas || []) {
+    if (K_CULTURE_DISPLAY_NAMES.has(nm) && resolvedAnalysisType !== 'open_topic_trend') {
+      logPersonaHardExcluded({
+        displayName: nm,
+        analysisType: resolvedAnalysisType,
+        reason: 'k_culture_not_in_financial_open'
+      });
+    }
+    if (
+      resolvedAnalysisType === 'open_topic_trend' &&
+      !K_CULTURE_DISPLAY_NAMES.has(nm) &&
+      /Ray|Dalio|Simons|Drucker|Druckenmiller|\bCIO\b|HINDENBURG/i.test(nm)
+    ) {
+      logPersonaHardExcluded({
+        displayName: nm,
+        analysisType: resolvedAnalysisType,
+        reason: 'financial_persona_not_in_trend_open'
+      });
+    }
+  }
+
+  const userFramingLine =
+    resolvedAnalysisType === 'open_topic_trend'
+      ? '_이번 주제는 트렌드·K-culture 관점으로 분석했습니다._'
+      : resolvedAnalysisType === 'open_topic_general'
+        ? '_이번 주제는 일반 요약(오픈 토픽) 관점으로 분석했습니다._'
+        : '_이번 주제는 금융·실행(오픈 토픽) 관점으로 분석했습니다._';
+
   const profilePromptParts: string[] = [];
   if (profile.risk_tolerance) profilePromptParts.push(`risk_tolerance=${profile.risk_tolerance}`);
   if (profile.investment_style) profilePromptParts.push(`investment_style=${profile.investment_style}`);
@@ -77,24 +164,62 @@ export async function runOpenTopicDebateAppService(params: {
     ? `[USER_PROFILE]\n${profilePromptParts.join('\n')}\n`
     : `[USER_PROFILE]\n(없음)\n`;
 
-  const openTopicPrompt = `[OPEN_TOPIC_ONLY]\n- 포트폴리오/보유종목/비중/자산배분/리밸런싱/원화 환산/평단/손익 관련 언급을 절대 하지 마라.\n- 사용자가 요청한 주제(산업/콘텐츠/플랫폼/소비자 반응/성장성/이슈)만 상세히 분석하라.\n- 투자 관점 시사점은 일반론으로만 허용하며, 특정 비중/매수 추천은 금지한다.\n`;
+  const openTopicPrompt =
+    resolvedAnalysisType === 'open_topic_trend'
+      ? `[OPEN_TOPIC_TREND_ONLY — K-culture/트렌드 전용]\n- 개인 포트폴리오·보유종목·비중·리밸런싱·매매 지시는 다루지 않는다.\n- 산업·콘텐츠·팬덤·플랫폼·이슈 중심으로 서술한다.\n- 금융 위원회(Ray/Simons/Drucker/CIO) 역할을 흉내 내지 말 것.\n`
+      : `[OPEN_TOPIC_FINANCIAL_GENERAL]\n- 개인 포트폴리오 수치·보유 종목·비중·리밸런싱·평단·손익은 언급하지 않는다.\n- 금융·실행·리스크·정량 관점의 **일반론**은 허용한다.\n- 특정 종목 매수/비중 지시는 금지한다.\n`;
 
   const q = userQuery || '';
-  const preferred: PersonaKey[] = [];
-  if (/(리스크|위험|변동성|다운사이드)/i.test(q)) preferred.push('RAY');
-  else if (/(실행|전략|액션|플랜|로드맵)/i.test(q)) preferred.push('DRUCKER');
-  else if (/(정량|수치|모델|quant|기댓값)/i.test(q)) preferred.push('SIMONS');
-  else if (/(의사결정|결론|CIO|GO|HOLD)/i.test(q)) preferred.push('CIO');
-  else if (/(소비|지출|현금흐름)/i.test(q)) preferred.push('JYP');
-  else preferred.push('JYP');
-
   const avoided = new Set(profile.avoided_personas || []);
-  let selected = preferred.filter(p => !avoided.has(personaKeyToPersonaName(p)));
-  if (selected.length === 0) selected = preferred.slice(0, 1);
+
+  let selected: PersonaKey[] = [];
+  let personaPickSource: 'profile' | 'hint' | 'fallback' = 'profile';
+
+  if (resolvedAnalysisType === 'open_topic_trend') {
+    selected = (profile.preferred_personas || [])
+      .map(displayNameToTrendOpenPersonaKey)
+      .filter((k): k is PersonaKey => k != null)
+      .filter(k => !avoided.has(personaKeyToPersonaName(k)));
+    if (selected.length === 0) {
+      selected = ['JYP'];
+      personaPickSource = 'fallback';
+    }
+  } else {
+    selected = (profile.preferred_personas || [])
+      .map(displayNameToFinancialOpenPersonaKey)
+      .filter((k): k is PersonaKey => k != null)
+      .filter(k => !avoided.has(personaKeyToPersonaName(k)));
+
+    if (selected.length === 0) {
+      const hint: PersonaKey[] = [];
+      if (/(리스크|위험|변동성|다운사이드)/i.test(q)) hint.push('RAY');
+      else if (/(실행|전략|액션|플랜|로드맵)/i.test(q)) hint.push('DRUCKER');
+      else if (/(정량|수치|모델|quant|기댓값)/i.test(q)) hint.push('SIMONS');
+      else if (/(의사결정|결론|CIO|GO|HOLD)/i.test(q)) hint.push('CIO');
+      for (const h of hint) {
+        if (!avoided.has(personaKeyToPersonaName(h))) {
+          selected = [h];
+          personaPickSource = 'hint';
+          break;
+        }
+      }
+    }
+    if (!selected || selected.length === 0) {
+      selected = ['DRUCKER', 'CIO'];
+      personaPickSource = 'fallback';
+    }
+  }
+
   if (params.fastMode === 'light_summary') {
     selected = selected.slice(0, 1);
   }
 
+  logPersonaSelectionPolicyApplied({
+    analysisType: resolvedAnalysisType,
+    source: personaPickSource,
+    selected,
+    discordUserId: userId
+  });
   logger.info('OPEN_TOPIC', 'OPEN_TOPIC personas engaged', { discordUserId: userId, selected });
 
   const modePrompt = `[USER_MODE]\n${mode}\n(오픈 토픽은 금융 계산/포트폴리오 언급 없이 분석 톤만 반영)`;
@@ -155,6 +280,7 @@ export async function runOpenTopicDebateAppService(params: {
 
   const results: Partial<Record<PersonaKey, string>> = {};
   const providerMetaByKey: Partial<Record<PersonaKey, { provider: string; model: string; estimatedCostUsd?: number }>> = {};
+  let attachUserFramingOnce = true;
 
   const avatarFor = (p: PersonaKey): string =>
     p === 'JYP'
@@ -223,11 +349,16 @@ export async function runOpenTopicDebateAppService(params: {
         model_used: providerMetaByKey[p]?.model
       });
       if (params.onPersonaReady) {
+        let textOut = String(results[p] || '');
+        if (attachUserFramingOnce) {
+          textOut = `${userFramingLine}\n\n${textOut}`;
+          attachUserFramingOnce = false;
+        }
         await params.onPersonaReady({
           personaKey: p,
           agentName: personaKeyToPersonaName(p),
           avatarUrl: avatarFor(p),
-          text: String(results[p] || '')
+          text: textOut
         });
       }
     } catch (e: any) {
@@ -266,7 +397,14 @@ export async function runOpenTopicDebateAppService(params: {
   if (chatHistoryId) logger.info('DB', 'chat_history insert success (open_topic)', { chatHistoryId });
   assertActiveExecution(ex, 'open_topic:post_chat_insert');
 
-  const analysisType = guessAnalysisTypeFromTrigger(undefined, userQuery);
+  const guessedType = guessAnalysisTypeFromTrigger(undefined, userQuery);
+  let analysisType = resolvedAnalysisType;
+  if (ex) {
+    analysisType = ex.coerceAnalysisRoute(guessedType);
+  } else if (guessedType.startsWith('portfolio_')) {
+    logger.warn('ROUTE', 'ROUTE_OVERRIDE_BLOCKED', { from: resolvedAnalysisType, to: guessedType });
+    analysisType = resolvedAnalysisType;
+  }
   ex?.augmentRetryPayload({ analysisType });
 
   if (chatHistoryId) {
@@ -319,5 +457,5 @@ export async function runOpenTopicDebateAppService(params: {
     });
   }
 
-  return { analysisType, chatHistoryId, broadcasts };
+  return { status: 'ok', analysisType, chatHistoryId, broadcasts };
 }

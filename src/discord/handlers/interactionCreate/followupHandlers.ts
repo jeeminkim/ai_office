@@ -3,6 +3,15 @@ import { detectFinancialIntent } from '../../analysisFormatting';
 import { getFollowupSnapshotById, type FollowupSnapshotRow } from '../../../repositories/followupRepository';
 import type { DiscordInteractionContext } from '../../InteractionContext';
 
+function decodeOpenTopicAmbiguousRef(ref: string | null): string {
+  if (!ref || !ref.startsWith('otamb:')) return '';
+  try {
+    return Buffer.from(ref.slice('otamb:'.length), 'base64url').toString('utf8');
+  } catch {
+    return '';
+  }
+}
+
 function buildFollowupQueryFromLabel(label: string): string {
   const s = label.toLowerCase();
   if (/포트폴리오|자산|비중|점검/.test(s)) {
@@ -25,6 +34,64 @@ async function runFollowupContinuation(
   label: string
 ): Promise<void> {
   const userId = interaction.user.id;
+
+  if (snap.analysis_type === 'open_topic_ambiguous_view') {
+    const storedQuery = decodeOpenTopicAmbiguousRef(snap.chat_history_ref);
+    ctx.logger.info('FOLLOWUP', 'FOLLOWUP_SELECTED', {
+      user_id: userId,
+      snapshot_id: snap.id,
+      option_index: optionIndex,
+      label: label.slice(0, 200),
+      analysis_type: snap.analysis_type
+    });
+    ctx.updateHealth(s => {
+      s.ux.lastFollowupSelectedAt = new Date().toISOString();
+    });
+    if (!storedQuery.trim()) {
+      await ctx.interactions.safeDeferReply(interaction, { flags: 64 });
+      await interaction.editReply({ content: '세션이 만료되었거나 복원할 질문을 찾을 수 없습니다.' });
+      return;
+    }
+    let view: 'financial' | 'trend' | 'general' = 'general';
+    if (/금융/.test(label)) view = 'financial';
+    else if (/트렌드/.test(label)) view = 'trend';
+    ctx.logger.info('OPEN_TOPIC', 'OPEN_TOPIC_VIEW_SELECTED', {
+      view,
+      discordUserId: ctx.getDiscordUserId(interaction.user),
+      snapshot_id: snap.id,
+      label: label.slice(0, 120)
+    });
+    ctx.logger.info('FOLLOWUP', 'FOLLOWUP_EXECUTION_STARTED', {
+      user_id: userId,
+      execution_type: 'open_topic_ambiguous_view',
+      selected_option: label.slice(0, 200)
+    });
+    await interaction.deferReply({ ephemeral: false });
+    await interaction.editReply({
+      content: `**선택:** ${label.slice(0, 200)}\n선택한 관점으로 분석을 실행합니다… _(자동 주문 없음)_`
+    });
+    try {
+      await ctx.runtime.runOpenTopicDebate(userId, storedQuery, interaction, { forcedOpenTopicView: view });
+      ctx.logger.info('FOLLOWUP', 'FOLLOWUP_EXECUTION_COMPLETED', {
+        user_id: userId,
+        analysis_type: snap.analysis_type,
+        execution_type: 'open_topic_view_selected',
+        selected_option: label.slice(0, 200)
+      });
+      await interaction.editReply({
+        content: '**후속 분석이 채널에 전송되었습니다.** _(자동 주문 없음)_'
+      });
+    } catch (e: unknown) {
+      ctx.logger.warn('FOLLOWUP', 'open_topic_ambiguous_continuation_failed', {
+        message: e instanceof Error ? e.message : String(e)
+      });
+      await interaction.editReply({
+        content: '후속 분석 중 문제가 있었습니다. 잠시 후 다시 시도해 주세요. _(자동 주문 없음)_'
+      });
+    }
+    return;
+  }
+
   ctx.logger.info('FOLLOWUP', 'FOLLOWUP_SELECTED', {
     user_id: userId,
     snapshot_id: snap.id,

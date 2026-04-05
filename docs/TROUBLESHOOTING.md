@@ -32,6 +32,12 @@
 1. `OPENAI_API_KEY`, `OPENAI_MONTHLY_MAX_CALLS`, `OPENAI_MONTHLY_BUDGET_USD`, `OPENAI_FALLBACK_TO_GEMINI`.
 2. `LLM_PROVIDER` 로그의 fallback reason.
 
+## 5b. “왜 JYP/금융 위원이 나왔는가” (페르소나 그룹)
+
+1. `PERSONA_GROUP_SELECTED`, `ROUTE_FAMILY_LOCKED`, `OPEN_TOPIC_CLASSIFIED`로 **의도한 라우트 패밀리** 확인.
+2. 포트폴리오 경로: `COMMITTEE_COMPOSITION_BUILT`(`runMode`)·`PERSONA_WEIGHT_APPLIED`로 Ray/Hind/Simons 생략·경량 모드 확인; K-culture가 끼었다면 `PERSONA_HARD_EXCLUDED`·`ROUTE_OVERRIDE_BLOCKED` 유무 확인. 이상한 claim/피드백이 쌓이면 `CLAIM_EXTRACTION_PLACEHOLDER_SKIPPED`·`FEEDBACK_MAPPING_PLACEHOLDER_SKIPPED`로 위원 생략 플레이스홀더가 필터됐는지 확인.
+3. 트렌드 경로: `trend_*` 잠금 후 금융 위원이 보이면 상위 라우팅(오케스트레이터)부터 추적.
+
 ## 6. PM2 / 프로세스가 안 멈출 때 (Windows)
 
 1. `pm2 stop ai-office` 후 `pm2 list`.

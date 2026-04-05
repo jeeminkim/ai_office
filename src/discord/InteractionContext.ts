@@ -10,7 +10,8 @@ export type UpdateHealthFn = typeof updateHealth;
 
 export type UserRiskMode = 'SAFE' | 'BALANCED' | 'AGGRESSIVE';
 
-export type PortfolioDebateFastMode = 'none' | 'light_summary' | 'short_summary';
+export type PortfolioDebateFastMode = 'none' | 'light_summary' | 'short_summary' | 'retry_summary';
+export type OpenTopicDebateFastMode = 'none' | 'light_summary' | 'short_summary';
 export type TrendAnalysisFastMode = 'none' | 'short';
 
 /** runPortfolioDebate / runOpenTopic / runTrend 등 index에 남은 오케스트레이션 (자동 주문 없음). */
@@ -33,7 +34,7 @@ export type InteractionRuntimeBundle = {
     userId: string,
     userQuery: string,
     sourceInteraction: any,
-    opts?: { fastMode?: PortfolioDebateFastMode }
+    opts?: { fastMode?: OpenTopicDebateFastMode; forcedOpenTopicView?: 'financial' | 'trend' | 'general' }
   ) => Promise<void>;
   runDataCenterAction: (
     userId: string,

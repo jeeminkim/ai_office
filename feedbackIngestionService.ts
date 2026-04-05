@@ -3,6 +3,7 @@ import { logger } from './logger';
 import type { FeedbackType } from './analysisTypes';
 import { refreshPersonaMemoryFromFeedback } from './personaMemoryService';
 import { resolveClaimMappingForFeedback, saveClaimFeedback } from './claimLedgerService';
+import { isCommitteeSkippedPlaceholderResponse } from './src/services/committeeCompositionService';
 
 const supabase = createClient(
   process.env.SUPABASE_URL || '',
@@ -28,6 +29,24 @@ export async function ingestPersonaFeedback(params: {
   candidateCount: number;
 }> {
   const { discordUserId, chatHistoryId, analysisType, personaName, feedbackType, opinionText } = params;
+
+  if (isCommitteeSkippedPlaceholderResponse(opinionText)) {
+    logger.info('FEEDBACK', 'FEEDBACK_MAPPING_PLACEHOLDER_SKIPPED', {
+      discordUserId,
+      analysisType,
+      personaName,
+      chatHistoryId
+    });
+    return {
+      mappedCount: 0,
+      fallbackLegacyOnly: true,
+      duplicate: false,
+      bestClaimId: null,
+      mappingMethod: 'legacy_only',
+      mappingScore: null,
+      candidateCount: 0
+    };
+  }
 
   if (!chatHistoryId) {
     logger.warn('FEEDBACK', 'ingestPersonaFeedback skipped (chatHistoryId is null)', {

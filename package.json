@@ -16,7 +16,8 @@
     "check:decision-engine": "ts-node scripts/decision-engine-self-check.ts",
     "smoke:interaction": "node -r ./scripts/setDummySupabaseEnv.cjs -r ts-node/register scripts/interaction-smoke-check.ts",
     "smoke:panel-restore": "ts-node scripts/panel-restore-smoke.ts",
-    "smoke:followup-routes": "node -r ./scripts/setDummySupabaseEnv.cjs -r ts-node/register scripts/followup-route-smoke.ts"
+    "smoke:followup-routes": "node -r ./scripts/setDummySupabaseEnv.cjs -r ts-node/register scripts/followup-route-smoke.ts",
+    "docs:check": "ts-node scripts/docs-check.ts"
   },
   "dependencies": {
     "express": "^4.21.2",

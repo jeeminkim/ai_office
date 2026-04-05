@@ -5,7 +5,8 @@ import { loadPersonaMemory } from './personaMemoryService';
 import { saveClaims, saveClaimOutcomeAuditSkeleton } from './claimLedgerService';
 import type { PersonaMemory } from './analysisTypes';
 import { buildPersonaEvidenceBundle } from './analysisContextService';
-import { extractClaimsByContract } from './src/contracts/claimContract';
+import { extractClaimsByContract, type ClaimExtractionResult } from './src/contracts/claimContract';
+import { isCommitteeSkippedPlaceholderResponse } from './src/services/committeeCompositionService';
 import { insertGenerationTraceExtendedOrBase } from './src/repositories/generationTraceRepository';
 import { dbPersistFallbackResult } from './src/contracts/fallbackPolicy';
 
@@ -105,13 +106,25 @@ export async function persistAnalysisArtifacts(params: {
     });
   }
 
-  const extraction = extractClaimsByContract({
-    responseText,
-    analysisType,
-    personaName
-  });
+  const skipClaims = isCommitteeSkippedPlaceholderResponse(responseText);
+  if (skipClaims) {
+    logger.info('PIPELINE', 'CLAIM_EXTRACTION_PLACEHOLDER_SKIPPED', {
+      discordUserId,
+      analysisType,
+      personaName,
+      chatHistoryId
+    });
+  }
+
+  const extraction: ClaimExtractionResult = skipClaims
+    ? { claims: [], fallbackUsed: false }
+    : extractClaimsByContract({
+        responseText,
+        analysisType,
+        personaName
+      });
   const claims = extraction.claims;
-  if (extraction.fallbackUsed) {
+  if (!skipClaims && extraction.fallbackUsed) {
     logger.info('CLAIMS', 'extraction contract: single-claim fallback path', { personaName, analysisType });
   }
 

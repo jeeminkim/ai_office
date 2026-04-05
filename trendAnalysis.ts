@@ -109,6 +109,12 @@ export async function generateTrendSpecialistResponseWithProvider(
   options?: TrendGenerateOptions
 ): Promise<string> {
   const cfg = TREND_TOPIC_CONFIG[topic];
+  logger.info('PERSONA', 'PERSONA_SELECTION_POLICY_APPLIED', {
+    analysisType: 'trend',
+    topic,
+    personaKey: cfg.personaKey,
+    agentLabel: cfg.agentLabel
+  });
   const shortHint = options?.fastShort
     ? '\n\n[FAST_SHORT] 응답은 600자 이내 한국어로 핵심만.\n[COMPRESSION_MODE: aggressive_compressed]\n'
     : '';
